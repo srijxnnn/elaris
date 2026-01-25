@@ -3,6 +3,7 @@ name = "elaris"
 version = "0.1.0"
 edition = "2024"
 license = "GPL"
+description = "A NES emulator written in Rust. (WIP)"
 
 
 [dependencies]
