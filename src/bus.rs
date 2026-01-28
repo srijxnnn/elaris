@@ -1,13 +1,16 @@
-use crate::cartridge::Cartridge;
+use crate::{cartridge::Cartridge, ppu::ppu::PPU};
 
 pub trait Bus {
     fn read(&mut self, addr: u16) -> u8;
     fn write(&mut self, addr: u16, data: u8);
+    fn tick(&mut self, cycles: usize);
+    fn poll_nmi(&mut self) -> bool;
 }
 
 pub struct NesBus {
     pub ram: [u8; 2048],
     pub cart: Cartridge,
+    pub ppu: PPU,
 }
 
 impl NesBus {
@@ -15,6 +18,7 @@ impl NesBus {
         Self {
             ram: [0; 2048],
             cart,
+            ppu: PPU::new(),
         }
     }
 }
@@ -34,6 +38,21 @@ impl Bus for NesBus {
                 self.ram[(addr & 0x07FF) as usize] = data;
             }
             _ => {} // Ignore writes to ROM/PPU
+        }
+    }
+
+    fn tick(&mut self, cycles: usize) {
+        for _ in 0..(cycles * 3) {
+            self.ppu.tick();
+        }
+    }
+
+    fn poll_nmi(&mut self) -> bool {
+        if self.ppu.nmi {
+            self.ppu.nmi = false;
+            true
+        } else {
+            false
         }
     }
 }
