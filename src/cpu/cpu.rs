@@ -48,6 +48,10 @@ impl<B: Bus> CPU<B> {
             return;
         }
 
+        if self.bus.poll_nmi() {
+            self.nmi();
+        }
+
         let pc = self.pc;
         let opcode = self.fetch_byte();
         // println!(
@@ -56,7 +60,10 @@ impl<B: Bus> CPU<B> {
         //     opcode
         // );
         self.trace(pc, opcode);
+        let prev_cycles = self.cycles;
         self.execute_opcode(opcode);
+        let cycle_diff = self.cycles - prev_cycles;
+        self.bus.tick(cycle_diff);
     }
 
     fn jam(&mut self) {
@@ -3683,7 +3690,7 @@ impl<B: Bus> CPU<B> {
         self.push((self.pc >> 8) as u8);
         self.push(self.pc as u8);
 
-        let status = self.status & !FLAG_BREAK;
+        let status = (self.status & !FLAG_BREAK) | FLAG_UNUSED;
         self.push(status);
 
         self.status |= FLAG_INTERRUPT_DISABLE;
@@ -3699,7 +3706,7 @@ impl<B: Bus> CPU<B> {
         self.push((self.pc >> 8) as u8);
         self.push(self.pc as u8);
 
-        let status = self.status & !FLAG_BREAK;
+        let status = (self.status & !FLAG_BREAK) | FLAG_UNUSED;
         self.push(status);
 
         self.status |= FLAG_INTERRUPT_DISABLE;
@@ -3731,7 +3738,6 @@ impl<B: Bus> CPU<B> {
             self.pc = self.pc.wrapping_add(offset as u16);
             self.cycles += 1;
 
-            // page-cross penalty
             if (old_pc & 0xFF00) != (self.pc & 0xFF00) {
                 self.cycles += 1;
             }
