@@ -5,6 +5,8 @@ pub trait Bus {
     fn write(&mut self, addr: u16, data: u8);
     fn tick(&mut self, cycles: usize);
     fn poll_nmi(&mut self) -> bool;
+    fn read_ppu_status(&mut self) -> u8;
+    fn write_ppu_ctrl(&mut self, data: u8);
 }
 
 pub struct NesBus {
@@ -27,6 +29,7 @@ impl Bus for NesBus {
     fn read(&mut self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x1FFF => self.ram[(addr & 0x07FF) as usize],
+            0x2002 => self.read_ppu_status(),
             0x8000..=0xFFFF => self.cart.read(addr),
             _ => 0, // PPU/APU ignored for nestest
         }
@@ -37,6 +40,7 @@ impl Bus for NesBus {
             0x0000..=0x1FFF => {
                 self.ram[(addr & 0x07FF) as usize] = data;
             }
+            0x2000 => self.write_ppu_ctrl(data),
             _ => {} // Ignore writes to ROM/PPU
         }
     }
@@ -54,5 +58,22 @@ impl Bus for NesBus {
         } else {
             false
         }
+    }
+
+    fn read_ppu_status(&mut self) -> u8 {
+        let mut status = 0u8;
+
+        if self.ppu.vblank {
+            status |= 0x80;
+        }
+
+        self.ppu.vblank = false;
+        self.ppu.nmi = false;
+
+        status
+    }
+
+    fn write_ppu_ctrl(&mut self, data: u8) {
+        self.ppu.ctrl = data;
     }
 }
