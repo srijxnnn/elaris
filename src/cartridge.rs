@@ -11,8 +11,6 @@ impl Cartridge {
         let mut data = Vec::new();
         file.read_to_end(&mut data).unwrap();
 
-        // iNES header is 16 bytes
-        // Reference: https://www.nesdev.org/wiki/INES
         let prg_start = 16;
         let prg_rom_size = data[4] as usize * 16 * 1024;
         let prg_end = prg_start + prg_rom_size;

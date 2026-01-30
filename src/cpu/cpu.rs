@@ -11,21 +11,18 @@ use crate::{
 use ansi_term::Colour::{Green, Red};
 
 pub struct CPU<B: Bus> {
-    pub a: u8,         // accumulator
-    pub x: u8,         // index register x
-    pub y: u8,         // index register y
-    pub sp: u8,        // stack pointer
-    pub pc: u16,       // program counter
-    pub status: u8,    // processor status
-    pub cycles: usize, // cycle tracking
-    pub bus: B,        // system bus
-    pub halted: bool,  // cpu halted
+    pub a: u8,
+    pub x: u8,
+    pub y: u8,
+    pub sp: u8,
+    pub pc: u16,
+    pub status: u8,
+    pub cycles: usize,
+    pub bus: B,
+    pub halted: bool,
 }
 
 impl<B: Bus> CPU<B> {
-    // When NES is powered on or reset
-    //
-    // Reference: https://www.nesdev.org/wiki/Init_code
     pub fn reset(&mut self) {
         let lo = self.bus.read(0xFFFC) as u16;
         let hi = self.bus.read(0xFFFD) as u16;
@@ -80,6 +77,13 @@ impl<B: Bus> CPU<B> {
         let lo = self.fetch_byte() as u16;
         let hi = self.fetch_byte() as u16;
         (hi << 8) | lo
+    }
+
+    fn trace(&self, pc: u16, opcode: u8) {
+        println!(
+            "{:04X}  {:02X}        A:{:02X} X:{:02X} Y:{:02X} P:{:02X} SP:{:02X} CYC:{}",
+            pc, opcode, self.a, self.x, self.y, self.status, self.sp, self.cycles
+        );
     }
 
     fn execute_opcode(&mut self, opcode: u8) {
@@ -210,7 +214,7 @@ impl<B: Bus> CPU<B> {
             0xC7 => self.dcp_zeropage(),
             0xD7 => self.dcp_zeropage_x(),
             0xC3 => self.dcp_indirect_x(),
-            0xD3 => self.dcp_indirect_y(), // might need cycle count tweaking (?)
+            0xD3 => self.dcp_indirect_y(),
             0xC0 => self.cpy_immediate(),
             0xCC => self.cpy_absolute(),
             0xC4 => self.cpy_zeropage(),
@@ -3744,12 +3748,5 @@ impl<B: Bus> CPU<B> {
         }
 
         self.cycles += 2;
-    }
-
-    fn trace(&self, pc: u16, opcode: u8) {
-        println!(
-            "{:04X}  {:02X}        A:{:02X} X:{:02X} Y:{:02X} P:{:02X} SP:{:02X} CYC:{}",
-            pc, opcode, self.a, self.x, self.y, self.status, self.sp, self.cycles
-        );
     }
 }

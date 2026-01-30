@@ -1,4 +1,4 @@
-use crate::{cartridge::Cartridge, ppu::ppu::PPU};
+use crate::{cartridge::Cartridge, controller::Controller, ppu::ppu::PPU};
 
 pub trait Bus {
     fn read(&mut self, addr: u16) -> u8;
@@ -13,6 +13,7 @@ pub struct NesBus {
     pub ram: [u8; 2048],
     pub cart: Cartridge,
     pub ppu: PPU,
+    pub controller: Controller,
 }
 
 impl NesBus {
@@ -21,6 +22,7 @@ impl NesBus {
             ram: [0; 2048],
             cart,
             ppu: PPU::new(),
+            controller: Controller { state: 0, shift: 0 },
         }
     }
 }
@@ -30,8 +32,13 @@ impl Bus for NesBus {
         match addr {
             0x0000..=0x1FFF => self.ram[(addr & 0x07FF) as usize],
             0x2002 => self.read_ppu_status(),
+            0x4016 => {
+                let bit = self.controller.shift & 1;
+                self.controller.shift >>= 1;
+                bit | 0x40
+            },
             0x8000..=0xFFFF => self.cart.read(addr),
-            _ => 0, // PPU/APU ignored for nestest
+            _ => todo!(),
         }
     }
 
@@ -41,7 +48,12 @@ impl Bus for NesBus {
                 self.ram[(addr & 0x07FF) as usize] = data;
             }
             0x2000 => self.write_ppu_ctrl(data),
-            _ => {} // Ignore writes to ROM/PPU
+            0x4016 => {
+                if data & 1 != 0 {
+                    self.controller.shift = self.controller.state;
+                }
+            }
+            _ => todo!(),
         }
     }
 
