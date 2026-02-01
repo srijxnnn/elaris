@@ -8,3 +8,4 @@ description = "A NES emulator written in Rust. (WIP)"
 
 [dependencies]
 ansi_term = "0.12.1"
+minifb = "0.28"

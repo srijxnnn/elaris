@@ -1,3 +1,8 @@
+//! 6502 CPU implementation for the NES.
+//!
+//! Emulates the MOS 6502 processor including all official and undocumented opcodes
+//! used by the NES. Supports nestest verification.
+
 use core::panic;
 
 use crate::{
@@ -8,8 +13,9 @@ use crate::{
     },
 };
 
-use ansi_term::Colour::{Green, Red};
+use ansi_term::Colour::Red;
 
+/// 6502 CPU with generic bus for memory/IO access.
 pub struct CPU<B: Bus> {
     pub a: u8,
     pub x: u8,
@@ -23,6 +29,7 @@ pub struct CPU<B: Bus> {
 }
 
 impl<B: Bus> CPU<B> {
+    /// Reset the CPU: load PC from $FFFC/$FFFD, set SP and status.
     pub fn reset(&mut self) {
         let lo = self.bus.read(0xFFFC) as u16;
         let hi = self.bus.read(0xFFFD) as u16;
@@ -40,17 +47,20 @@ impl<B: Bus> CPU<B> {
         self.cycles = 7;
     }
 
+    /// Execute one instruction: fetch, decode, execute, tick bus.
     pub fn step(&mut self) {
         if self.halted {
             return;
         }
 
+        // Handle NMI before executing next instruction
         if self.bus.poll_nmi() {
             self.nmi();
         }
 
         let pc = self.pc;
         let opcode = self.fetch_byte();
+        // Trace output for nestest comparison
         // println!(
         //     "{} executing opcode: ${:02X}",
         //     Green.bold().paint("INFO"),
@@ -63,22 +73,26 @@ impl<B: Bus> CPU<B> {
         self.bus.tick(cycle_diff);
     }
 
+    /// JAM: halt CPU (undocumented opcodes 02, 12, etc.).
     fn jam(&mut self) {
         self.halted = true;
     }
 
+    /// Fetch one byte from PC and increment PC.
     fn fetch_byte(&mut self) -> u8 {
         let byte = self.bus.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
         byte
     }
 
+    /// Fetch 16-bit little-endian word from PC.
     fn fetch_word(&mut self) -> u16 {
         let lo = self.fetch_byte() as u16;
         let hi = self.fetch_byte() as u16;
         (hi << 8) | lo
     }
 
+    /// Print nestest-compatible trace line.
     fn trace(&self, pc: u16, opcode: u8) {
         println!(
             "{:04X}  {:02X}        A:{:02X} X:{:02X} Y:{:02X} P:{:02X} SP:{:02X} CYC:{}",
@@ -86,6 +100,7 @@ impl<B: Bus> CPU<B> {
         );
     }
 
+    /// Dispatch opcode to the appropriate instruction handler.
     fn execute_opcode(&mut self, opcode: u8) {
         match opcode {
             0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 | 0x92 | 0xB2 | 0xD2 | 0xF2 => {
@@ -3672,6 +3687,7 @@ impl<B: Bus> CPU<B> {
         self.cycles += 4;
     }
 
+    /// Set Z and N flags based on 8-bit value.
     fn update_zero_and_negative_flags(&mut self, value: u8) {
         if value == 0 {
             self.status |= FLAG_ZERO;
@@ -3686,6 +3702,7 @@ impl<B: Bus> CPU<B> {
         }
     }
 
+    /// Handle IRQ: push PC and status, jump to $FFFE/$FFFF.
     fn irq(&mut self) {
         if self.status & FLAG_INTERRUPT_DISABLE != 0 {
             return;
@@ -3706,6 +3723,7 @@ impl<B: Bus> CPU<B> {
         self.cycles += 7;
     }
 
+    /// Handle NMI: push PC and status, jump to $FFFA/$FFFB.
     fn nmi(&mut self) {
         self.push((self.pc >> 8) as u8);
         self.push(self.pc as u8);
@@ -3722,18 +3740,21 @@ impl<B: Bus> CPU<B> {
         self.cycles += 7;
     }
 
+    /// Push byte onto stack at $0100+SP.
     fn push(&mut self, value: u8) {
         let addr = 0x0100 | self.sp as u16;
         self.bus.write(addr, value);
         self.sp = self.sp.wrapping_sub(1);
     }
 
+    /// Pop byte from stack at $0100+SP.
     fn pop(&mut self) -> u8 {
         self.sp = self.sp.wrapping_add(1);
         let addr = 0x0100 | self.sp as u16;
         self.bus.read(addr)
     }
 
+    /// Relative branch: add signed offset to PC if condition is true.
     fn branch(&mut self, condition: bool) {
         let offset = self.fetch_byte() as i8;
 
