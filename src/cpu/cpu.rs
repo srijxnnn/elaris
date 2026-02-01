@@ -13,7 +13,7 @@ use crate::{
     },
 };
 
-use ansi_term::Colour::Red;
+use ansi_term::Colour::{Green, Red};
 
 /// 6502 CPU with generic bus for memory/IO access.
 pub struct CPU<B: Bus> {
@@ -58,15 +58,7 @@ impl<B: Bus> CPU<B> {
             self.nmi();
         }
 
-        let pc = self.pc;
         let opcode = self.fetch_byte();
-        // Trace output for nestest comparison
-        // println!(
-        //     "{} executing opcode: ${:02X}",
-        //     Green.bold().paint("INFO"),
-        //     opcode
-        // );
-        self.trace(pc, opcode);
         let prev_cycles = self.cycles;
         self.execute_opcode(opcode);
         let cycle_diff = self.cycles - prev_cycles;
