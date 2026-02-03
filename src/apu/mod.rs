@@ -4,8 +4,7 @@
 //! - **Triangle**: 32-step wave, linear counter, length counter.
 //! - **Noise**: LFSR-based, envelope, length counter.
 //! - **Frame counter**: 4-step or 5-step mode; clocks envelope/linear/length/sweep.
+//! - **DMC**: Delta modulation channel; sample playback from PRG with CPU stall on fetch.
 //! - **Mixer**: NES-style non-linear mix; output sampled at 44.1 kHz.
-//!
-//! DMC (sample playback) is not implemented.
 
 pub mod apu;

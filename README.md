@@ -5,8 +5,8 @@ A NES (Nintendo Entertainment System) emulator written in Rust. Work in progress
 ## Features
 
 - **6502 CPU** – Full instruction set including undocumented opcodes; nestest-compatible
-- **PPU** – Background and sprite rendering, nametable mirroring, OAM, 256×240 framebuffer
-- **APU** – Pulse (×2), triangle, and noise channels; frame counter (4-step and 5-step); 44.1 kHz audio
+- **PPU** – Background and sprite rendering, nametable mirroring, OAM, PPUMASK ($2001) show bg/sprite, left 8-pixel clipping, grayscale, color emphasis, 256×240 framebuffer
+- **APU** – Pulse (×2), triangle, noise, and DMC channels; frame counter (4-step and 5-step); 44.1 kHz audio
 - **Cartridge** – iNES (.nes) loading; mappers: NROM (0), MMC1 (1)
 - **Controller** – Port 1 ($4016) shift-register protocol
 - **Display** – 256×240 window via minifb; scaled to fit
@@ -33,7 +33,7 @@ elaris [path/to/rom.nes]
 
 - **Escape** – Close the window and exit.
 
-Controller input is wired to port 1; button state is provided by the `Controller` struct (e.g. for future GUI or key mapping).
+**Controller (port 1):** Keyboard mapping — **A** = Z, **B** = X, **Select** = Shift, **Start** = Enter, **D-pad** = Arrow keys. Button state is latched when the game writes to $4016.
 
 ## Nestest
 
@@ -47,16 +47,16 @@ The emulator starts at the nestest entry point (`$C000`) and runs until it hits 
 
 ## Project layout
 
-| Path | Description |
-|------|-------------|
-| `src/main.rs` | Entry point, window, audio sink, frame loop |
-| `src/lib.rs` | Crate root and module list |
-| `src/bus.rs` | Memory map, PPU/APU/controller/cartridge dispatch |
-| `src/cpu/` | 6502 CPU and status flags |
-| `src/ppu/` | PPU timing, background, sprites, OAM, framebuffer |
-| `src/apu/` | APU channels, frame counter, mixer, sample buffer |
-| `src/cartridge/` | iNES loading and mappers (NROM, MMC1) |
-| `src/controller.rs` | NES controller shift register |
+| Path                | Description                                       |
+| ------------------- | ------------------------------------------------- |
+| `src/main.rs`       | Entry point, window, audio sink, frame loop       |
+| `src/lib.rs`        | Crate root and module list                        |
+| `src/bus.rs`        | Memory map, PPU/APU/controller/cartridge dispatch |
+| `src/cpu/`          | 6502 CPU and status flags                         |
+| `src/ppu/`          | PPU timing, background, sprites, OAM, framebuffer |
+| `src/apu/`          | APU channels, frame counter, mixer, sample buffer |
+| `src/cartridge/`    | iNES loading and mappers (NROM, MMC1)             |
+| `src/controller.rs` | NES controller shift register                     |
 
 ## License
 

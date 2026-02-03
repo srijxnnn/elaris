@@ -84,7 +84,7 @@ impl Bus for NesBus {
                 let r = addr & 0x2007;
                 match r {
                     0x2000 => self.ppu.write_ctrl(data),
-                    0x2001 => {} // PPUMASK: not implemented (always render)
+                    0x2001 => self.ppu.write_mask(data),
                     0x2003 => self.ppu.write_oam_addr(data),
                     0x2004 => self.ppu.write_oam_data(data),
                     0x2005 => self.ppu.write_scroll(data),

@@ -29,6 +29,9 @@ pub struct PPU {
     /// Set when entering vblank (scanline 241); clear after presenting the framebuffer.
     pub frame_ready: bool,
     pub ctrl: u8,
+    /// PPUMASK ($2001): bit0=grayscale, bit1=show bg left 8px, bit2=show sprites left 8px,
+    /// bit3=show background, bit4=show sprites, bits5-7=color emphasis (R,G,B).
+    pub mask: u8,
     pub addr: u16,
     pub addr_latch: bool,
     pub scroll_x: u8,
@@ -59,6 +62,7 @@ impl PPU {
             vblank: false,
             frame_ready: false,
             ctrl: 0,
+            mask: 0,
             addr: 0,
             addr_latch: false,
             scroll_x: 0,
@@ -72,6 +76,38 @@ impl PPU {
             sprite_overflow: false,
             framebuffer: [0; 256 * 240],
         }
+    }
+
+    /// Apply PPUMASK grayscale (bit0) and color emphasis (bits5-7) to a pixel.
+    fn apply_display_mask(&self, rgb: u32) -> u32 {
+        let r = ((rgb >> 16) & 0xFF) as u32;
+        let g = ((rgb >> 8) & 0xFF) as u32;
+        let b = (rgb & 0xFF) as u32;
+        let rgb = if self.mask & 0x01 != 0 {
+            let gray = (r + g + b) / 3;
+            (gray << 16) | (gray << 8) | gray
+        } else {
+            rgb
+        };
+        self.apply_emphasis(rgb)
+    }
+
+    /// Dim channels not emphasized by PPUMASK bits 5 (R), 6 (G), 7 (B).
+    fn apply_emphasis(&self, rgb: u32) -> u32 {
+        let m = self.mask;
+        let mut r = ((rgb >> 16) & 0xFF) as u32;
+        let mut g = ((rgb >> 8) & 0xFF) as u32;
+        let mut b = (rgb & 0xFF) as u32;
+        if m & 0x20 == 0 {
+            r = r * 2 / 3;
+        }
+        if m & 0x40 == 0 {
+            g = g * 2 / 3;
+        }
+        if m & 0x80 == 0 {
+            b = b * 2 / 3;
+        }
+        (r << 16) | (g << 8) | b
     }
 
     /// Render one visible scanline into the framebuffer (background + sprites).
@@ -89,6 +125,14 @@ impl PPU {
         };
         let mirroring = cart.mapper.mirroring();
         let y = scanline;
+
+        let show_bg = self.mask & 0x08 != 0;
+        let show_sprites = self.mask & 0x10 != 0;
+        let show_bg_left = self.mask & 0x02 != 0;
+        let show_sprites_left = self.mask & 0x04 != 0;
+
+        let backdrop_idx = self.palette[0] as usize & 0x3F;
+        let backdrop_rgb = NES_PALETTE_RGB[backdrop_idx];
 
         // Background pixel values (0-3) per x for sprite 0 hit and priority. 0 = transparent.
         let mut bg_pixel: [u8; 256] = [0; 256];
@@ -129,11 +173,14 @@ impl PPU {
 
             bg_pixel[x as usize] = pixel_value;
 
-            let palette_idx = 0x3F00 + (palette_bank as u16) * 4 + (pixel_value as u16);
-            let color_idx = self.palette[Self::palette_index(palette_idx)] as usize;
-            let rgb = NES_PALETTE_RGB[color_idx & 0x3F];
-
-            self.framebuffer[(y as usize) * 256 + (x as usize)] = rgb;
+            let rgb = if show_bg && (x >= 8 || show_bg_left) && pixel_value != 0 {
+                let palette_idx = 0x3F00 + (palette_bank as u16) * 4 + (pixel_value as u16);
+                let color_idx = self.palette[Self::palette_index(palette_idx)] as usize;
+                NES_PALETTE_RGB[color_idx & 0x3F]
+            } else {
+                backdrop_rgb
+            };
+            self.framebuffer[(y as usize) * 256 + (x as usize)] = self.apply_display_mask(rgb);
         }
 
         // Sprite evaluation: find up to 8 sprites on this scanline (lower OAM index = higher priority).
@@ -216,6 +263,9 @@ impl PPU {
             let row_lo = cart.read(tile_addr + row_in_tile as u16);
             let row_hi = cart.read(tile_addr + row_in_tile as u16 + 8);
 
+            if !show_sprites {
+                continue;
+            }
             for px in 0..8u16 {
                 let col = if flip_h { 7 - px } else { px };
                 let bit = 7 - col;
@@ -225,6 +275,9 @@ impl PPU {
 
                 let screen_x = (slot.x as i16 + px as i16) as usize;
                 if screen_x >= 256 {
+                    continue;
+                }
+                if screen_x < 8 && !show_sprites_left {
                     continue;
                 }
                 let idx = (y as usize) * 256 + screen_x;
@@ -242,7 +295,8 @@ impl PPU {
 
                 let palette_idx = palette_base + pixel_value as u16;
                 let color_idx = self.palette[Self::palette_index(palette_idx)] as usize;
-                self.framebuffer[idx] = NES_PALETTE_RGB[color_idx & 0x3F];
+                let rgb = NES_PALETTE_RGB[color_idx & 0x3F];
+                self.framebuffer[idx] = self.apply_display_mask(rgb);
             }
         }
     }
@@ -347,6 +401,11 @@ impl PPU {
     /// Write PPUCTRL ($2000).
     pub fn write_ctrl(&mut self, data: u8) {
         self.ctrl = data;
+    }
+
+    /// Write PPUMASK ($2001).
+    pub fn write_mask(&mut self, data: u8) {
+        self.mask = data;
     }
 
     /// Write PPUADDR ($2006): two-byte write for 16-bit VRAM address (high then low).

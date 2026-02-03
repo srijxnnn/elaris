@@ -91,7 +91,9 @@ impl Pulse {
     /// $4003/$4007: length counter load, timer high 3 bits; restarts envelope and sequencer.
     fn write_4003(&mut self, data: u8) {
         self.timer_period = (self.timer_period & 0x00FF) | ((data & 7) as u16) << 8;
-        self.length_counter = LENGTH_TABLE[(data >> 3) as usize & 0x1F];
+        if self.enabled {
+            self.length_counter = LENGTH_TABLE[(data >> 3) as usize & 0x1F];
+        }
         self.envelope_start = true;
         self.sequencer_step = 0;
     }
@@ -121,28 +123,31 @@ impl Pulse {
 
     fn clock_sweep(&mut self) -> bool {
         let mut silence = false;
-        if self.sweep_reload {
-            if self.sweep_divider == 0 {
-                self.sweep_reload = false;
-            }
+
+        // Save whether divider is currently zero (before reload/decrement)
+        let divider_was_zero = self.sweep_divider == 0;
+
+        // Step 1: Reload divider or decrement
+        if self.sweep_divider == 0 || self.sweep_reload {
             self.sweep_divider = self.sweep_period;
-        } else if self.sweep_divider > 0 {
-            self.sweep_divider -= 1;
+            self.sweep_reload = false;
         } else {
-            self.sweep_divider = self.sweep_period;
-            if self.sweep_enable && self.sweep_shift > 0 {
-                let delta = self.timer_period >> self.sweep_shift;
-                if self.sweep_negate {
-                    self.timer_period = self.timer_period.saturating_sub(delta);
-                } else {
-                    self.timer_period = self.timer_period.saturating_add(delta);
-                }
-                if self.timer_period > 0x7FF {
-                    silence = true;
-                }
-            }
-            self.sweep_reload = true;
+            self.sweep_divider -= 1;
         }
+
+        // Step 2: When divider was zero, adjust period if sweep enabled
+        if divider_was_zero && self.sweep_enable && self.sweep_shift > 0 {
+            let delta = self.timer_period >> self.sweep_shift;
+            if self.sweep_negate {
+                self.timer_period = self.timer_period.saturating_sub(delta);
+            } else {
+                self.timer_period = self.timer_period.saturating_add(delta);
+            }
+            if self.timer_period > 0x7FF {
+                silence = true;
+            }
+        }
+
         silence
     }
 
@@ -168,7 +173,7 @@ impl Pulse {
             return false;
         }
         self.timer = self.timer_period;
-        self.sequencer_step = (self.sequencer_step + 1) & 7;
+        self.sequencer_step = (self.sequencer_step.wrapping_sub(1)) & 7;
         false
     }
 }
@@ -206,7 +211,9 @@ impl Triangle {
     /// $400B: length counter load, timer high 3 bits; sets linear reload flag.
     fn write_400b(&mut self, data: u8) {
         self.timer_period = (self.timer_period & 0x00FF) | ((data & 7) as u16) << 8;
-        self.length_counter = LENGTH_TABLE[(data >> 3) as usize & 0x1F];
+        if self.enabled {
+            self.length_counter = LENGTH_TABLE[(data >> 3) as usize & 0x1F];
+        }
         self.linear_reload = true;
     }
 
@@ -222,7 +229,7 @@ impl Triangle {
         } else if self.linear_counter > 0 {
             self.linear_counter -= 1;
         }
-        if self.length_halt {
+        if !self.length_halt {
             self.linear_reload = false;
         }
     }
@@ -231,6 +238,7 @@ impl Triangle {
         if !self.enabled
             || self.length_counter == 0
             || self.linear_counter == 0
+            || self.timer_period < 2
         {
             return 0;
         }
@@ -287,7 +295,9 @@ impl Noise {
 
     /// $400F: length counter load; restarts envelope.
     fn write_400f(&mut self, data: u8) {
-        self.length_counter = LENGTH_TABLE[(data >> 3) as usize & 0x1F];
+        if self.enabled {
+            self.length_counter = LENGTH_TABLE[(data >> 3) as usize & 0x1F];
+        }
         self.envelope_start = true;
     }
 
@@ -326,11 +336,11 @@ impl Noise {
     }
 
     fn tick_cpu_cycle(&mut self) {
-        let period = NOISE_PERIOD_TABLE[self.period_index as usize];
         if self.timer > 0 {
             self.timer -= 1;
             return;
         }
+        let period = NOISE_PERIOD_TABLE[self.period_index as usize];
         self.timer = period;
         let feedback = if self.mode {
             (self.shift & 1) ^ ((self.shift >> 6) & 1)
@@ -338,6 +348,177 @@ impl Noise {
             (self.shift & 1) ^ ((self.shift >> 1) & 1)
         };
         self.shift = (self.shift >> 1) | (feedback << 14);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// DMC channel ($4010–$4013): delta modulation, sample buffer, memory reader
+// -----------------------------------------------------------------------------
+
+/// DMC rate period table (NTSC), CPU cycles per output bit. From NESdev.
+const DMC_RATE_TABLE: [u16; 16] = [
+    428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54,
+];
+
+struct Dmc {
+    irq_enable: bool,
+    loop_flag: bool,
+    rate_index: u8,
+    rate_timer: u16,
+    output_level: u8,
+    start_address: u16,
+    sample_length: u16,
+    current_address: u16,
+    bytes_remaining: u16,
+    /// Single-byte sample buffer; filled by memory reader, emptied into shift_register when output cycle starts.
+    sample_buffer: Option<u8>,
+    shift_register: u8,
+    bits_remaining: u8,
+    /// True when buffer is empty (no sample byte to output). Power-on and when waiting for fetch: output 0.
+    silence: bool,
+    enabled: bool,
+    /// When true, the bus must stall CPU 4 cycles, read from fetch_address, and call dmc_feed_byte.
+    fetch_pending: bool,
+    fetch_address: u16,
+}
+
+impl Default for Dmc {
+    fn default() -> Self {
+        Self {
+            irq_enable: false,
+            loop_flag: false,
+            rate_index: 0,
+            rate_timer: 0,
+            output_level: 0,
+            start_address: 0,
+            sample_length: 0,
+            current_address: 0,
+            bytes_remaining: 0,
+            sample_buffer: None,
+            shift_register: 0,
+            bits_remaining: 0,
+            silence: true, // power-on: output 0 until we have sample data
+            enabled: false,
+            fetch_pending: false,
+            fetch_address: 0,
+        }
+    }
+}
+
+impl Dmc {
+    /// $4010: IRQ enable (bit 7), loop (bit 6), rate index (bits 0–3). Clearing IRQ enable clears DMC IRQ.
+    fn write_4010(&mut self, data: u8, status: &mut u8) {
+        self.irq_enable = data & 0x80 != 0;
+        if !self.irq_enable {
+            *status &= 0x7F;
+        }
+        self.loop_flag = data & 0x40 != 0;
+        self.rate_index = data & 0x0F;
+    }
+
+    /// $4011: Direct load — set output level to lower 7 bits.
+    fn write_4011(&mut self, data: u8) {
+        self.output_level = data & 0x7F;
+    }
+
+    /// $4012: Sample address = $C000 + (value * 64).
+    fn write_4012(&mut self, data: u8) {
+        self.start_address = 0xC000 + (data as u16) * 64;
+    }
+
+    /// $4013: Sample length = (value * 16) + 1 bytes.
+    fn write_4013(&mut self, data: u8) {
+        self.sample_length = (data as u16) * 16 + 1;
+    }
+
+    /// Enable/disable from $4015 bit 4. When enabled and bytes_remaining == 0, (re)start sample.
+    fn set_enabled(&mut self, enabled: bool) {
+        if !enabled {
+            self.enabled = false;
+            self.fetch_pending = false;
+            return;
+        }
+        self.enabled = true;
+        if self.bytes_remaining == 0 {
+            self.current_address = self.start_address;
+            self.bytes_remaining = self.sample_length;
+            self.fetch_pending = self.sample_buffer.is_none() && self.bytes_remaining > 0;
+            if self.fetch_pending {
+                self.fetch_address = self.current_address;
+            }
+        }
+    }
+
+    /// Called by bus after stalling 4 cycles and reading the byte from PRG. Address wrap $FFFF -> $8000.
+    fn feed_byte(&mut self, byte: u8, status: &mut u8) {
+        self.fetch_pending = false;
+        self.sample_buffer = Some(byte);
+        self.current_address = self.current_address.wrapping_add(1);
+        if self.current_address == 0 {
+            self.current_address = 0x8000;
+        }
+        if self.bytes_remaining > 0 {
+            self.bytes_remaining -= 1;
+        }
+        if self.bytes_remaining == 0 {
+            if self.loop_flag {
+                self.current_address = self.start_address;
+                self.bytes_remaining = self.sample_length;
+            } else if self.irq_enable {
+                *status |= 0x80;
+            }
+        }
+    }
+
+    /// Run one CPU cycle: count down rate timer; when it hits 0, output one bit (or silence) and possibly start new cycle / request fetch.
+    fn tick(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        if self.rate_timer > 0 {
+            self.rate_timer -= 1;
+            return;
+        }
+        let period = DMC_RATE_TABLE[self.rate_index as usize];
+        self.rate_timer = period.saturating_sub(1);
+
+        if !self.silence {
+            let bit = self.shift_register & 1;
+            if bit != 0 {
+                if self.output_level <= 125 {
+                    self.output_level += 2;
+                }
+            } else if self.output_level >= 2 {
+                self.output_level -= 2;
+            }
+        }
+        self.shift_register >>= 1;
+
+        if self.bits_remaining > 0 {
+            self.bits_remaining -= 1;
+        }
+        if self.bits_remaining == 0 {
+            self.bits_remaining = 8;
+            if let Some(byte) = self.sample_buffer.take() {
+                self.shift_register = byte;
+                self.silence = false;
+            } else {
+                self.silence = true;
+            }
+            if self.sample_buffer.is_none() && self.bytes_remaining > 0 {
+                self.fetch_pending = true;
+                self.fetch_address = self.current_address;
+            }
+        }
+    }
+
+    /// Output for mixer: 0 when silence, else 7-bit level (0–127). Sent to mixer whether enabled or not.
+    fn output(&self) -> u8 {
+        if self.silence { 0 } else { self.output_level }
+    }
+
+    fn has_bytes_remaining(&self) -> bool {
+        self.bytes_remaining > 0 || self.sample_buffer.is_some()
     }
 }
 
@@ -353,7 +534,7 @@ fn pulse_table(n: usize) -> f32 {
     95.52 / (8128.0 / (n as f32) + 100.0)
 }
 
-/// TND mixer lookup: 163.67 / (24329/n + 100). n = 3×triangle + 2×noise + dmc (dmc=0 here).
+/// TND mixer lookup: 163.67 / (24329/n + 100). n = 3×triangle + 2×noise + dmc.
 fn tnd_table(n: usize) -> f32 {
     if n == 0 {
         return 0.0;
@@ -365,12 +546,13 @@ fn tnd_table(n: usize) -> f32 {
 // APU: register dispatch, frame counter, tick, sample buffer
 // -----------------------------------------------------------------------------
 
-/// APU state: all channels, frame counter, status, and sample buffer for 44.1 kHz output.
+/// APU state: all channels (including DMC), frame counter, status, and sample buffer for 44.1 kHz output.
 pub struct APU {
     pulse1: Pulse,
     pulse2: Pulse,
     triangle: Triangle,
     noise: Noise,
+    dmc: Dmc,
     status: u8,
     frame_irq_inhibit: bool,
     frame_4step: bool,
@@ -391,7 +573,11 @@ impl APU {
             pulse1: Pulse::default(),
             pulse2: Pulse::default(),
             triangle: Triangle::default(),
-            noise: Noise { shift: 1, ..Noise::default() },
+            noise: Noise {
+                shift: 1,
+                ..Noise::default()
+            },
+            dmc: Dmc::default(),
             status: 0,
             frame_irq_inhibit: false,
             frame_4step: true,
@@ -418,6 +604,10 @@ impl APU {
             0x400C => self.noise.write_400c(data),
             0x400E => self.noise.write_400e(data),
             0x400F => self.noise.write_400f(data),
+            0x4010 => self.dmc.write_4010(data, &mut self.status),
+            0x4011 => self.dmc.write_4011(data),
+            0x4012 => self.dmc.write_4012(data),
+            0x4013 => self.dmc.write_4013(data),
             0x4015 => {
                 self.pulse1.enabled = data & 1 != 0;
                 self.pulse2.enabled = data & 2 != 0;
@@ -435,6 +625,7 @@ impl APU {
                 if !self.noise.enabled {
                     self.noise.length_counter = 0;
                 }
+                self.dmc.set_enabled(data & 0x10 != 0);
             }
             0x4017 => {
                 self.frame_4step = data & 0x80 == 0;
@@ -454,7 +645,7 @@ impl APU {
         }
     }
 
-    /// Read $4015: length counter status (bits 0–3), frame IRQ (bit 6). Clears frame IRQ.
+    /// Read $4015: length counter status (bits 0–3), DMC active (bit 4), frame IRQ (bit 6), DMC IRQ (bit 7). Clears both IRQ bits.
     pub fn read_status(&mut self) -> u8 {
         let mut r = self.status & 0xC0;
         if self.pulse1.length_counter > 0 {
@@ -469,8 +660,26 @@ impl APU {
         if self.noise.length_counter > 0 {
             r |= 0x08;
         }
+        if self.dmc.has_bytes_remaining() {
+            r |= 0x10;
+        }
         self.status &= 0x3F;
         r
+    }
+
+    /// If the DMC needs a sample byte, returns Some(address) to read from PRG ($8000–$FFFF).
+    /// The bus must stall the CPU for 4 cycles, read the byte, then call dmc_feed_byte(byte).
+    pub fn dmc_wants_fetch(&self) -> Option<u16> {
+        if self.dmc.fetch_pending {
+            Some(self.dmc.fetch_address)
+        } else {
+            None
+        }
+    }
+
+    /// Feed a byte read from PRG into the DMC after a requested fetch. Call only when dmc_wants_fetch() returned Some.
+    pub fn dmc_feed_byte(&mut self, byte: u8) {
+        self.dmc.feed_byte(byte, &mut self.status);
     }
 
     /// Quarter-frame: clock envelope (pulse, noise) and triangle linear counter.
@@ -499,12 +708,13 @@ impl APU {
         let pulse_sum = (p1 + p2) as usize;
         let tri = self.triangle.output();
         let noi = self.noise.output();
-        let tnd = 3 * (tri as usize) + 2 * (noi as usize) + 0;
+        let dmc = self.dmc.output() as usize;
+        let tnd = 3 * (tri as usize) + 2 * (noi as usize) + dmc;
         let pulse_out = pulse_table(pulse_sum.min(31));
         let tnd_out = tnd_table(tnd.min(203));
         let out = pulse_out + tnd_out;
-        // Scale to 0..1 and apply gain so NES-level output is clearly audible
-        ((out / 255.0) * 1.8).min(1.0)
+        // Scale to 0..1 and apply moderate gain
+        (out / 255.0).min(1.0)
     }
 
     /// Advance APU by `cycles` CPU cycles: frame counter, channel timers, mixer samples.
@@ -561,6 +771,7 @@ impl APU {
             }
             self.triangle.tick_cpu_cycle();
             self.noise.tick_cpu_cycle();
+            self.dmc.tick();
 
             self.sample_phase += 1.0;
             if self.sample_phase >= CYCLES_PER_SAMPLE {

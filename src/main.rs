@@ -6,7 +6,7 @@
 use std::env;
 use std::time::{Duration, Instant};
 
-use elaris::{bus::NesBus, cartridge::cartridge::Cartridge, cpu::cpu::CPU};
+use elaris::{bus::Bus, bus::NesBus, cartridge::cartridge::Cartridge, cpu::cpu::CPU};
 use minifb::{Key, Window, WindowOptions};
 use rodio::OutputStream;
 
@@ -15,6 +15,36 @@ const FRAME_DURATION: Duration = Duration::from_nanos(16_666_667);
 
 /// Audio output sample rate (Hz). Matches APU sample generation rate.
 const SAMPLE_RATE: u32 = 44_100;
+
+/// NES controller 1 bits: 0=A, 1=B, 2=Select, 3=Start, 4=Up, 5=Down, 6=Left, 7=Right.
+fn controller_state_from_keys(window: &Window) -> u8 {
+    let mut state = 0u8;
+    if window.is_key_down(Key::Z) {
+        state |= 1 << 0; // A
+    }
+    if window.is_key_down(Key::X) {
+        state |= 1 << 1; // B
+    }
+    if window.is_key_down(Key::RightShift) || window.is_key_down(Key::LeftShift) {
+        state |= 1 << 2; // Select
+    }
+    if window.is_key_down(Key::Enter) {
+        state |= 1 << 3; // Start
+    }
+    if window.is_key_down(Key::Up) {
+        state |= 1 << 4;
+    }
+    if window.is_key_down(Key::Down) {
+        state |= 1 << 5;
+    }
+    if window.is_key_down(Key::Left) {
+        state |= 1 << 6;
+    }
+    if window.is_key_down(Key::Right) {
+        state |= 1 << 7;
+    }
+    state
+}
 
 fn main() {
     // Load ROM from path or default to nestest for CPU verification
@@ -73,8 +103,20 @@ fn main() {
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let frame_start = Instant::now();
 
+        // Keyboard → controller port 1 (latched when game writes to $4016)
+        cpu.bus.controller.state = controller_state_from_keys(&window);
+
         // Run CPU until PPU enters vblank (scanline 241); PPU/APU tick on each bus.tick()
         while !cpu.bus.frame_ready() {
+            // DMC memory reader: when buffer empty, stall CPU 4 cycles and read one byte from PRG
+            while let Some(addr) = cpu.bus.apu.dmc_wants_fetch() {
+                cpu.cycles += 4;
+                for _ in 0..4 {
+                    cpu.bus.tick(1);
+                }
+                let byte = cpu.bus.read(addr);
+                cpu.bus.apu.dmc_feed_byte(byte);
+            }
             cpu.step();
             if cpu.halted {
                 break;
