@@ -12,6 +12,7 @@ use crate::cartridge::mapper::mapper::Mapper;
 use crate::cartridge::mapper::mapper0::Mapper0;
 use crate::cartridge::mapper::mapper1::Mapper1;
 use crate::cartridge::mapper::mapper4::Mapper4;
+use crate::cartridge::mapper::Mirroring;
 
 /// Cartridge: holds PRG/CHR and the mapper that implements read/write and nametable mirroring.
 /// CPU reads PRG via bus at $8000–$FFFF; PPU reads CHR at $0000–$1FFF (pattern tables).
@@ -44,8 +45,14 @@ impl Cartridge {
 
         // Mapper number from header bytes 6–7 (iNES). 0 = NROM, 1 = MMC1, 4 = MMC3.
         let mapper_id = (data[6] >> 4) | (data[7] & 0xF0);
+        // Mirroring from iNES byte 6 bit 0: 0 = horizontal, 1 = vertical (board solder pads for NROM).
+        let mirroring = if data[6] & 1 != 0 {
+            Mirroring::Vertical
+        } else {
+            Mirroring::Horizontal
+        };
         let mapper: Box<dyn Mapper> = match mapper_id {
-            0 => Box::new(Mapper0::new(prg_rom, chr_rom)),
+            0 => Box::new(Mapper0::new(prg_rom, chr_rom, mirroring)),
             1 => Box::new(Mapper1::new(prg_rom)),
             4 => Box::new(Mapper4::new(prg_rom, chr_rom)),
             _ => panic!("unsupported mapper {}", mapper_id),

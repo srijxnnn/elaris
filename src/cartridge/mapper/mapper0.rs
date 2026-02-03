@@ -7,16 +7,23 @@
 use crate::cartridge::mapper::{Mirroring, mapper::Mapper};
 
 /// NROM: one or two 16 KiB PRG banks, 8 KiB CHR (ROM or RAM). No registers.
+/// Mirroring is fixed by the board; we take it from the iNES header (byte 6 bit 0).
 pub struct Mapper0 {
     prg_rom: Vec<u8>,
     chr_rom: Vec<u8>,
+    mirroring: Mirroring,
 }
 
 impl Mapper0 {
-    /// Create NROM with given PRG and CHR. CHR may be ROM or used as 8 KiB RAM (writable) if
+    /// Create NROM with given PRG, CHR, and mirroring. CHR may be ROM or used as 8 KiB RAM (writable) if
     /// cartridge has no CHR ROM (chr_rom.len() == 8192 and we allow writes).
-    pub fn new(prg_rom: Vec<u8>, chr_rom: Vec<u8>) -> Self {
-        Self { prg_rom, chr_rom }
+    /// Mirroring should come from iNES header byte 6 bit 0 (0 = horizontal, 1 = vertical).
+    pub fn new(prg_rom: Vec<u8>, chr_rom: Vec<u8>, mirroring: Mirroring) -> Self {
+        Self {
+            prg_rom,
+            chr_rom,
+            mirroring,
+        }
     }
 }
 
@@ -50,8 +57,8 @@ impl Mapper for Mapper0 {
         }
     }
 
-    /// NROM mirroring is determined by solder pads on the board; we default to horizontal.
+    /// NROM mirroring is fixed by the board; we use the value from the iNES header.
     fn mirroring(&mut self) -> Mirroring {
-        Mirroring::Horizontal
+        self.mirroring
     }
 }
