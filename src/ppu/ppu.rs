@@ -16,7 +16,10 @@ pub const NES_PALETTE_RGB: [u32; 64] = [
     0x000000,
 ];
 
-/// PPU state: timing, VRAM, nametables, palettes, and framebuffer.
+/// OAM (Object Attribute Memory): 64 sprites × 4 bytes. Each entry: Y, tile, attr, X.
+pub const OAM_LEN: usize = 256;
+
+/// PPU state: timing, VRAM, nametables, palettes, OAM, and framebuffer.
 pub struct PPU {
     pub cycle: u16,
     pub scanline: i16,
@@ -33,6 +36,14 @@ pub struct PPU {
     pub nametable: [u8; 0x800],
     /// Palette RAM $3F00-$3F1F (32 bytes, with NES mirroring).
     pub palette: [u8; 32],
+    /// OAM: 64 sprites × 4 bytes (Y, tile, attr, X). Written via $2003/$2004 or $4014 DMA.
+    pub oam: [u8; OAM_LEN],
+    /// OAM address for $2003/$2004 (byte index 0..255).
+    pub oam_addr: u8,
+    /// Sprite 0 hit (PPUSTATUS bit 6); cleared on read of $2002.
+    pub sprite_0_hit: bool,
+    /// Sprite overflow (PPUSTATUS bit 5); cleared on read of $2002.
+    pub sprite_overflow: bool,
     /// 256×240 framebuffer (0xRRGGBB per pixel). Row-major, left-to-right, top-to-bottom.
     pub framebuffer: [u32; 256 * 240],
 }
@@ -54,11 +65,15 @@ impl PPU {
             scroll_latch: false,
             nametable: [0; 0x800],
             palette: [0; 32],
+            oam: [0; OAM_LEN],
+            oam_addr: 0,
+            sprite_0_hit: false,
+            sprite_overflow: false,
             framebuffer: [0; 256 * 240],
         }
     }
 
-    /// Render one visible scanline into the framebuffer (background only).
+    /// Render one visible scanline into the framebuffer (background + sprites).
     /// Called when the PPU has just finished that scanline (real NES: pixels output during the scanline).
     pub fn render_scanline(&mut self, cart: &mut Cartridge, scanline: u16) {
         let fine_x = self.scroll_x & 7;
@@ -73,6 +88,9 @@ impl PPU {
         };
         let mirroring = cart.mapper.mirroring();
         let y = scanline;
+
+        // Background pixel values (0-3) per x for sprite 0 hit and priority. 0 = transparent.
+        let mut bg_pixel: [u8; 256] = [0; 256];
 
         for x in 0..256u16 {
             let total_x = (x as u32 + fine_x as u32 + (coarse_x as u32) * 8) % 512;
@@ -108,11 +126,123 @@ impl PPU {
             let high = (row_hi >> bit) & 1;
             let pixel_value = (high << 1) | low;
 
+            bg_pixel[x as usize] = pixel_value;
+
             let palette_idx = 0x3F00 + (palette_bank as u16) * 4 + (pixel_value as u16);
             let color_idx = self.palette[Self::palette_index(palette_idx)] as usize;
             let rgb = NES_PALETTE_RGB[color_idx & 0x3F];
 
             self.framebuffer[(y as usize) * 256 + (x as usize)] = rgb;
+        }
+
+        // Sprite evaluation: find up to 8 sprites on this scanline (lower OAM index = higher priority).
+        let sprite_height = if self.ctrl & 0x20 != 0 { 16 } else { 8 };
+        let sprite_pattern_base = if self.ctrl & 0x08 != 0 {
+            0x1000u16
+        } else {
+            0x0000
+        };
+
+        #[derive(Clone, Copy)]
+        struct SpriteSlot {
+            oam_index: u8,
+            y_offset: u8,
+            y: u8,
+            tile: u8,
+            attr: u8,
+            x: u8,
+        }
+
+        let mut slots: [Option<SpriteSlot>; 8] = [None; 8];
+        let mut slot_count = 0u8;
+
+        for i in 0..64u8 {
+            let base = (i as usize) * 4;
+            let oam_y = self.oam[base];
+            let oam_tile = self.oam[base + 1];
+            let oam_attr = self.oam[base + 2];
+            let oam_x = self.oam[base + 3];
+
+            let y_lo = oam_y as u16;
+            let y_hi = y_lo + sprite_height;
+            if scanline >= y_lo && scanline < y_hi {
+                if slot_count < 8 {
+                    let y_offset = (scanline - y_lo) as u8;
+                    slots[slot_count as usize] = Some(SpriteSlot {
+                        oam_index: i,
+                        y_offset,
+                        y: oam_y,
+                        tile: oam_tile,
+                        attr: oam_attr,
+                        x: oam_x,
+                    });
+                    slot_count += 1;
+                } else {
+                    self.sprite_overflow = true;
+                }
+            }
+        }
+
+        // Draw sprites back-to-front (highest OAM index first) so lower-index sprites appear on top.
+        for s in (0..slot_count).rev() {
+            let slot = slots[s as usize].unwrap();
+            let flip_v = slot.attr & 0x80 != 0;
+            let flip_h = slot.attr & 0x40 != 0;
+            let behind_bg = slot.attr & 0x20 != 0;
+            let palette_bank = (slot.attr & 3) as u16;
+            let palette_base = 0x3F10 + palette_bank * 4;
+
+            let row_in_sprite = if flip_v {
+                (sprite_height - 1) as u8 - slot.y_offset
+            } else {
+                slot.y_offset
+            };
+
+            let (tile_addr, row_in_tile) = if sprite_height == 8 {
+                let addr = sprite_pattern_base + (slot.tile as u16) * 16;
+                (addr, row_in_sprite)
+            } else {
+                let table = (slot.tile & 1) as u16 * 0x1000;
+                let tile_8 = (slot.tile & 0xFE) as u16;
+                let (tile_idx, row) = if row_in_sprite < 8 {
+                    (tile_8, row_in_sprite)
+                } else {
+                    (tile_8 + 1, row_in_sprite - 8)
+                };
+                (table + tile_idx * 16, row)
+            };
+
+            let row_lo = cart.read(tile_addr + row_in_tile as u16);
+            let row_hi = cart.read(tile_addr + row_in_tile as u16 + 8);
+
+            for px in 0..8u16 {
+                let col = if flip_h { 7 - px } else { px };
+                let bit = 7 - col;
+                let low = (row_lo >> bit) & 1;
+                let high = (row_hi >> bit) & 1;
+                let pixel_value = (high << 1) | low;
+
+                let screen_x = (slot.x as i16 + px as i16) as usize;
+                if screen_x >= 256 {
+                    continue;
+                }
+                let idx = (y as usize) * 256 + screen_x;
+                let bg_val = bg_pixel[screen_x];
+
+                if pixel_value == 0 {
+                    continue;
+                }
+                if slot.oam_index == 0 && bg_val != 0 {
+                    self.sprite_0_hit = true;
+                }
+                if behind_bg && bg_val != 0 {
+                    continue;
+                }
+
+                let palette_idx = palette_base + pixel_value as u16;
+                let color_idx = self.palette[Self::palette_index(palette_idx)] as usize;
+                self.framebuffer[idx] = NES_PALETTE_RGB[color_idx & 0x3F];
+            }
         }
     }
 
@@ -164,20 +294,53 @@ impl PPU {
         completed_scanline
     }
 
-    /// Read PPUSTATUS ($2002); clears vblank, addr latch, scroll latch.
+    /// Read PPUSTATUS ($2002); clears vblank, sprite 0 hit, sprite overflow, addr latch, scroll latch.
     pub fn read_status(&mut self) -> u8 {
         let mut status = 0u8;
 
         if self.vblank {
             status |= 0x80;
         }
+        if self.sprite_0_hit {
+            status |= 0x40;
+        }
+        if self.sprite_overflow {
+            status |= 0x20;
+        }
 
         self.vblank = false;
         self.nmi = false;
+        self.sprite_0_hit = false;
+        self.sprite_overflow = false;
         self.addr_latch = false;
         self.scroll_latch = false;
 
         status
+    }
+
+    /// Write OAMADDR ($2003).
+    pub fn write_oam_addr(&mut self, data: u8) {
+        self.oam_addr = data;
+    }
+
+    /// Read OAMDATA ($2004); returns OAM byte at current OAMADDR (read does not increment on real NES).
+    pub fn read_oam_data(&mut self) -> u8 {
+        self.oam[self.oam_addr as usize]
+    }
+
+    /// Write OAMDATA ($2004); writes OAM and increments OAMADDR.
+    pub fn write_oam_data(&mut self, data: u8) {
+        self.oam[self.oam_addr as usize] = data;
+        self.oam_addr = self.oam_addr.wrapping_add(1);
+    }
+
+    /// Copy 256 bytes from CPU RAM into OAM (OAM DMA from $4014). Source page is the high byte;
+    /// address is mirrored in 2KB RAM (e.g. page 0x02 → $0200-$02FF).
+    pub fn oam_dma(&mut self, ram: &[u8; 2048], page: u8) {
+        let start = ((page as u16) << 8) as usize % 2048;
+        for i in 0..256 {
+            self.oam[i] = ram[(start + i) % 2048];
+        }
     }
 
     /// Write PPUCTRL ($2000).

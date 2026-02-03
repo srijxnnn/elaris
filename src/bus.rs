@@ -52,6 +52,7 @@ impl Bus for NesBus {
                 let r = addr & 0x2007;
                 match r {
                     0x2002 => self.ppu.read_status(),
+                    0x2004 => self.ppu.read_oam_data(),
                     0x2007 => self.ppu.read_data(&mut self.cart),
                     _ => 0x40, // open bus for write-only / unused
                 }
@@ -76,8 +77,8 @@ impl Bus for NesBus {
                 match r {
                     0x2000 => self.ppu.write_ctrl(data),
                     0x2001 => {} // PPUMASK: stub
-                    0x2003 => {} // OAMADDR: stub
-                    0x2004 => {} // OAMDATA: stub
+                    0x2003 => self.ppu.write_oam_addr(data),
+                    0x2004 => self.ppu.write_oam_data(data),
                     0x2005 => self.ppu.write_scroll(data),
                     0x2006 => self.ppu.write_addr(data),
                     0x2007 => self.ppu.write_data(&mut self.cart, data),
@@ -85,7 +86,8 @@ impl Bus for NesBus {
                 }
             }
             // APU, expansion: no-op
-            0x4000..=0x4015 | 0x4017..=0x401F => {}
+            0x4000..=0x4013 | 0x4015..=0x401F => {}
+            0x4014 => self.ppu.oam_dma(&self.ram, data),
             0x4016 => self.controller.write(data),
             0x4020..=0x7FFF => {}
             // Cartridge: mapper registers (e.g. MMC1)
