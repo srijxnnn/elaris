@@ -284,13 +284,13 @@ impl PPU {
 
         match mirroring {
             Mirroring::Vertical => match table {
-                0 | 1 => offset,
-                2 | 3 => offset + 0x400,
+                0 | 2 => offset,
+                1 | 3 => offset + 0x400,
                 _ => unreachable!(),
             },
             Mirroring::Horizontal => match table {
-                0 | 2 => offset,
-                1 | 3 => offset + 0x400,
+                0 | 1 => offset,
+                2 | 3 => offset + 0x400,
                 _ => unreachable!(),
             },
         }
