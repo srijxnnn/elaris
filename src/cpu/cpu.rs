@@ -1,8 +1,17 @@
-//! 6502 CPU implementation for the NES.
+//! 6502 CPU implementation for the NES (Ricoh 2A03).
 //!
-//! Emulates the MOS 6502 (Ricoh 2A03 variant): all official and undocumented
-//! opcodes used by the NES. Bus trait abstracts memory and I/O. Supports
-//! nestest for verification. NMI from PPU vblank; no IRQ/BRK cycle accuracy.
+//! Emulates the [CPU](https://www.nesdev.org/wiki/CPU) with full [instruction set](https://www.nesdev.org/wiki/Instruction_reference)
+//! including [unofficial opcodes](https://www.nesdev.org/wiki/CPU_unofficial_opcodes). Bus trait
+//! implements the [CPU memory map](https://www.nesdev.org/wiki/CPU_memory_map). nestest-compatible.
+//!
+//! ## NESdev references
+//!
+//! - **Reset**: [Reset vector](https://www.nesdev.org/wiki/CPU_memory_map#Vectors) at $FFFC–$FFFD;
+//!   [power-up state](https://www.nesdev.org/wiki/CPU_power_up_state) (SP=$FD, P=$34; I and U set).
+//! - **NMI**: [NMI](https://www.nesdev.org/wiki/NMI) triggered by PPU vblank; polled before each
+//!   instruction. Vectors at $FFFA–$FFFB.
+//! - **Stack**: $0100–$01FF; SP is 8-bit, stack grows downward. BRK/IRQ push P, PC (high then low).
+//! - **JAM**: Opcodes $02, $12, $22, … ($x2) lock the CPU; we set `halted` and stop (used by nestest).
 
 use core::panic;
 
@@ -16,9 +25,9 @@ use crate::{
 
 use ansi_term::Colour::Red;
 
-/// 6502 CPU with generic bus for memory/IO access.
-/// A, X, Y: accumulators and index registers. SP: stack pointer ($0100–$01FF).
-/// PC: program counter. status: P register (NZVCIDB flags). cycles: total elapsed.
+/// 6502 CPU with generic bus for memory and I/O (PPU, APU, cartridge, controller).
+/// Registers: A (accumulator), X, Y (index); SP (stack pointer, $0100–$01FF); PC (program counter);
+/// P (status: N V - B D I Z C). Cycles: total CPU cycles elapsed (for nestest / timing).
 pub struct CPU<B: Bus> {
     pub a: u8,
     pub x: u8,
@@ -28,19 +37,21 @@ pub struct CPU<B: Bus> {
     pub status: u8,
     pub cycles: usize,
     pub bus: B,
-    /// True when JAM (illegal opcode) has been executed.
+    /// True when a JAM (illegal) opcode ($02, $12, $22, …) has been executed; CPU stops.
     pub halted: bool,
 }
 
 impl<B: Bus> CPU<B> {
-    /// Reset the CPU: load PC from $FFFC/$FFFD, set SP and status.
+    /// Reset: load PC from reset vector $FFFC–$FFFD (supplied by cartridge). SP=$FD, P=$24 (I and U
+    /// set). A, X, Y = 0. Reset takes 7 cycles on real hardware (we set cycles = 7).
+    /// See NESdev "Reset vector", "CPU power up state".
     pub fn reset(&mut self) {
         let lo = self.bus.read(0xFFFC) as u16;
         let hi = self.bus.read(0xFFFD) as u16;
 
         self.pc = (hi << 8) | lo;
 
-        self.sp = 0xFD; // resets at 0xFD instead of 0xFF for some reason
+        self.sp = 0xFD; // 2A03 reset leaves SP at $FD, not $FF (NESdev power up state)
         self.status = FLAG_INTERRUPT_DISABLE | FLAG_UNUSED;
 
         self.a = 0;
@@ -51,13 +62,15 @@ impl<B: Bus> CPU<B> {
         self.cycles = 7;
     }
 
-    /// Execute one instruction: fetch, decode, execute, tick bus.
+    /// Execute one instruction: check NMI, fetch opcode at PC, execute (updating cycles), then
+    /// tick the bus by the instruction's cycle count (PPU advances 3×, APU 1× per CPU cycle).
     pub fn step(&mut self) {
         if self.halted {
             return;
         }
 
-        // Handle NMI before executing next instruction
+        // NMI is level-sensitive; we poll once per instruction. If PPU raised NMI (vblank + enable),
+        // push PC and P, set PC from $FFFA–$FFFB, set I. See NMI.
         if self.bus.poll_nmi() {
             self.nmi();
         }
@@ -69,26 +82,27 @@ impl<B: Bus> CPU<B> {
         self.bus.tick(cycle_diff);
     }
 
-    /// JAM: halt CPU (undocumented opcodes 02, 12, etc.).
+    /// JAM: undocumented opcodes that lock the CPU ($02, $12, $22, $32, $42, $52, $62, $72,
+    /// $92, $B2, $D2, $F2). We set halted and stop execution (nestest expects this).
     fn jam(&mut self) {
         self.halted = true;
     }
 
-    /// Fetch one byte from PC and increment PC.
+    /// Fetch one byte from current PC and increment PC. Used for opcodes and operands.
     fn fetch_byte(&mut self) -> u8 {
         let byte = self.bus.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
         byte
     }
 
-    /// Fetch 16-bit little-endian word from PC.
+    /// Fetch 16-bit little-endian address from PC (low byte first, then high).
     fn fetch_word(&mut self) -> u16 {
         let lo = self.fetch_byte() as u16;
         let hi = self.fetch_byte() as u16;
         (hi << 8) | lo
     }
 
-    /// Print nestest-compatible trace line.
+    /// Print nestest-compatible trace line (PC, opcode, A, X, Y, P, SP, CYC).
     fn trace(&self, pc: u16, opcode: u8) {
         println!(
             "{:04X}  {:02X}        A:{:02X} X:{:02X} Y:{:02X} P:{:02X} SP:{:02X} CYC:{}",
@@ -96,7 +110,8 @@ impl<B: Bus> CPU<B> {
         );
     }
 
-    /// Dispatch opcode to the appropriate instruction handler (by opcode value).
+    /// Decode opcode and run the corresponding instruction. Cycle counts follow NESdev instruction
+    /// reference (including page cross and branch taken penalties).
     fn execute_opcode(&mut self, opcode: u8) {
         match opcode {
             // JAM (undocumented): halt CPU

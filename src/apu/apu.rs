@@ -1,23 +1,39 @@
-//! NES APU: pulse (x2), triangle, noise, frame counter, and mixer.
+//! NES APU (Audio Processing Unit) implementation.
 //!
-//! APU runs at CPU clock; pulse/noise timers and frame counter run at half rate (1 APU cycle = 2 CPU cycles).
-//! Triangle timer runs at CPU rate. See NESdev wiki for details.
+//! Implements the [APU](https://www.nesdev.org/wiki/APU) as in the Ricoh 2A03: five channels (pulse×2,
+//! triangle, noise, DMC), [frame counter](https://www.nesdev.org/wiki/APU_Frame_Counter) (4-step or
+//! 5-step), and [APU Mixer](https://www.nesdev.org/wiki/APU_Mixer) (non-linear). Registers $4000–$4013,
+//! $4015, $4017. See [APU registers](https://www.nesdev.org/wiki/APU_registers).
+//!
+//! ## Timing
+//!
+//! - Pulse and noise: timer clocked every 2 CPU cycles (APU "half cycle").
+//! - Triangle: timer at CPU rate. Length/envelope/sweep clocked by frame counter (~240 Hz).
+//! - DMC: rate from lookup table; when sample buffer empty, CPU is stalled 4 cycles for PRG read.
+//!
+//! ## References
+//!
+//! - [APU Pulse](https://www.nesdev.org/wiki/APU_Pulse), [APU Triangle](https://www.nesdev.org/wiki/APU_Triangle)
+//! - [APU Noise](https://www.nesdev.org/wiki/APU_Noise), [APU DMC](https://www.nesdev.org/wiki/APU_DMC)
+//! - [APU Length Counter](https://www.nesdev.org/wiki/APU_Length_Counter), [APU Envelope](https://www.nesdev.org/wiki/APU_Envelope)
 
-/// NTSC CPU clock ~1.789773 MHz. Sample rate 44100 → ~40.56 cycles per sample.
+/// NTSC CPU clock ~1.789773 MHz. We generate one sample every CYCLES_PER_SAMPLE CPU cycles (~40.56)
+/// to get 44.1 kHz output. See Cycle_reference_chart.
 const CYCLES_PER_SAMPLE: f64 = 1_789_773.0 / 44_100.0;
 
-/// Length counter lookup (indices 0x00..0x1F). From NESdev.
+/// Length counter lookup table: 5-bit index from register → count. APU_Length_Counter.
 const LENGTH_TABLE: [u8; 32] = [
     10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22,
     192, 24, 72, 26, 16, 28, 32, 30,
 ];
 
-/// Noise period table (NTSC), CPU cycles. From NESdev.
+/// Noise channel period table (NTSC): 4-bit index from $400E → period in CPU cycles. APU_Noise.
 const NOISE_PERIOD_TABLE: [u16; 16] = [
     4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068,
 ];
 
-/// Pulse duty sequences (8 steps each). Sequencer reads in order 0,7,6,5,4,3,2,1.
+/// Pulse channel duty cycles (8 steps). Duty 0=12.5%, 1=25%, 2=50%, 3=25% negated. Sequencer steps
+/// 0→7→6→…→1. APU_Pulse. Output is volume when step is 1, else 0.
 const PULSE_DUTY: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%
     [0, 0, 0, 0, 0, 0, 1, 1], // 25%
@@ -25,23 +41,25 @@ const PULSE_DUTY: [[u8; 8]; 4] = [
     [1, 1, 1, 1, 1, 1, 0, 0], // 25% negated
 ];
 
-/// Triangle wave 32-step sequence (0-15 then 15-0).
+/// Triangle channel 32-step waveform: 15 down to 0, then 0 up to 15. No volume control. APU_Triangle.
 const TRIANGLE_SEQUENCE: [u8; 32] = [
     15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
     13, 14, 15,
 ];
 
-/// 4-step frame counter: cycle counts at which quarter/half frame and IRQ fire (CPU cycles).
+/// 4-step frame counter: resets every 29830 CPU cycles. Quarter/half frame at 7457, 14913, 22371;
+/// IRQ (if not inhibited) at 29829. APU_Frame_Counter.
 const FRAME_4STEP_RESET: u32 = 29830;
 
-/// 5-step frame counter: no IRQ; reset after last step (CPU cycles).
+/// 5-step frame counter: no IRQ; resets every 37282 cycles. Extra half-frame at 37281.
 const FRAME_5STEP_RESET: u32 = 37282;
 
 // -----------------------------------------------------------------------------
-// Pulse channel ($4000–$4003 / $4004–$4007): duty, envelope, sweep, length, timer
+// Pulse channel ($4000–$4003 = pulse 1, $4004–$4007 = pulse 2)
+// Duty, envelope, sweep, length counter, 11-bit timer. Timer clocked every 2 CPU cycles.
 // -----------------------------------------------------------------------------
 
-/// Pulse channel state. Timer runs at APU cycle rate (every 2 CPU cycles).
+/// Pulse channel: square wave with configurable duty, volume/envelope, frequency sweep, length counter.
 #[derive(Default)]
 struct Pulse {
     enabled: bool,
@@ -179,10 +197,11 @@ impl Pulse {
 }
 
 // -----------------------------------------------------------------------------
-// Triangle channel ($4008–$400B): linear counter, length, 32-step waveform
+// Triangle channel ($4008–$400B): linear counter (7-bit), length counter, 32-step triangle wave
+// Timer runs at CPU cycle rate (one octave below pulse for same period).
 // -----------------------------------------------------------------------------
 
-/// Triangle channel state. Timer runs at CPU cycle rate.
+/// Triangle channel: 32-step triangle wave, linear counter + length counter, no volume control.
 #[derive(Default)]
 struct Triangle {
     enabled: bool,
@@ -258,10 +277,10 @@ impl Triangle {
 }
 
 // -----------------------------------------------------------------------------
-// Noise channel ($400C–$400F): envelope, LFSR, period table, length counter
+// Noise channel ($400C–$400F): envelope, 15-bit LFSR, period from $400E, length counter
 // -----------------------------------------------------------------------------
 
-/// Noise channel state. LFSR is 15-bit; timer uses NOISE_PERIOD_TABLE (CPU cycles).
+/// Noise channel: pseudo-random output from 15-bit LFSR; mode bit shortens period (metallic tone).
 #[derive(Default)]
 struct Noise {
     enabled: bool,
@@ -352,10 +371,11 @@ impl Noise {
 }
 
 // -----------------------------------------------------------------------------
-// DMC channel ($4010–$4013): delta modulation, sample buffer, memory reader
+// DMC channel ($4010–$4013): delta modulation, 7-bit output, sample buffer, CPU stall on fetch
+// Sample address $C000 + (byte*64); length (byte*16)+1. APU_DMC.
 // -----------------------------------------------------------------------------
 
-/// DMC rate period table (NTSC), CPU cycles per output bit. From NESdev.
+/// DMC rate table (NTSC): 4-bit index from $4010 → CPU cycles per output bit. APU_DMC.
 const DMC_RATE_TABLE: [u16; 16] = [
     428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54,
 ];
@@ -523,10 +543,10 @@ impl Dmc {
 }
 
 // -----------------------------------------------------------------------------
-// Mixer: NES non-linear formulas (pulse and TND groups)
+// Mixer: NES non-linear combination (APU_Mixer). Pulse group and TND group combined.
 // -----------------------------------------------------------------------------
 
-/// Pulse mixer lookup: 95.52 / (8128/n + 100) for n = pulse1 + pulse2 (0..31). n=0 → 0.
+/// Pulse output: 95.52 / (8128/n + 100), n = pulse1 + pulse2 (0–31). APU_Mixer.
 fn pulse_table(n: usize) -> f32 {
     if n == 0 {
         return 0.0;
@@ -534,7 +554,7 @@ fn pulse_table(n: usize) -> f32 {
     95.52 / (8128.0 / (n as f32) + 100.0)
 }
 
-/// TND mixer lookup: 163.67 / (24329/n + 100). n = 3×triangle + 2×noise + dmc.
+/// TND (triangle + noise + DMC) output: 163.67 / (24329/n + 100), n = 3*tri + 2*noise + dmc.
 fn tnd_table(n: usize) -> f32 {
     if n == 0 {
         return 0.0;
@@ -546,7 +566,8 @@ fn tnd_table(n: usize) -> f32 {
 // APU: register dispatch, frame counter, tick, sample buffer
 // -----------------------------------------------------------------------------
 
-/// APU state: all channels (including DMC), frame counter, status, and sample buffer for 44.1 kHz output.
+/// APU state: pulse×2, triangle, noise, DMC; frame counter; status ($4015); sample buffer for
+/// 44.1 kHz output. tick(cycles) advances frame counter and channels, pushes samples when due.
 pub struct APU {
     pulse1: Pulse,
     pulse2: Pulse,
@@ -587,7 +608,8 @@ impl APU {
         }
     }
 
-    /// Write to APU registers $4000–$4017. Called from bus on CPU write.
+    /// Write to APU registers. $4000–$4013 = channel regs; $4015 = enable + length status;
+    /// $4017 = frame counter (mode 4/5-step, IRQ inhibit). Writing $4017 resets frame counter.
     pub fn write(&mut self, addr: u16, data: u8) {
         match addr {
             0x4000 => self.pulse1.write_4000(data),
@@ -645,7 +667,8 @@ impl APU {
         }
     }
 
-    /// Read $4015: length counter status (bits 0–3), DMC active (bit 4), frame IRQ (bit 6), DMC IRQ (bit 7). Clears both IRQ bits.
+    /// Read $4015: bits 0–3 = length counter > 0 for pulse1, pulse2, triangle, noise; bit 4 = DMC
+    /// has bytes remaining; bit 6 = frame IRQ; bit 7 = DMC IRQ. Reading clears frame and DMC IRQ.
     pub fn read_status(&mut self) -> u8 {
         let mut r = self.status & 0xC0;
         if self.pulse1.length_counter > 0 {
@@ -667,8 +690,9 @@ impl APU {
         r
     }
 
-    /// If the DMC needs a sample byte, returns Some(address) to read from PRG ($8000–$FFFF).
-    /// The bus must stall the CPU for 4 cycles, read the byte, then call dmc_feed_byte(byte).
+    /// DMC memory reader: when sample buffer is empty and bytes_remaining > 0, returns Some(addr)
+    /// for the bus to read from PRG. Bus must stall CPU 4 cycles, read byte, call dmc_feed_byte.
+    /// See APU_DMC "Memory reader".
     pub fn dmc_wants_fetch(&self) -> Option<u16> {
         if self.dmc.fetch_pending {
             Some(self.dmc.fetch_address)
@@ -717,8 +741,8 @@ impl APU {
         (out / 255.0).min(1.0)
     }
 
-    /// Advance APU by `cycles` CPU cycles: frame counter, channel timers, mixer samples.
-    /// Pushes one sample every ~40.56 CPU cycles (44.1 kHz).
+    /// Advance APU by `cycles` CPU cycles: frame counter (quarter/half frame, IRQ), pulse/noise/triangle/DMC
+    /// timers, and mixer. One sample pushed every CYCLES_PER_SAMPLE cycles (~44.1 kHz).
     pub fn tick(&mut self, cycles: usize) {
         let cycles = cycles as u32;
         for _ in 0..cycles {

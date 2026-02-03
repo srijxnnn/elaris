@@ -1,11 +1,14 @@
 //! Mapper 1 (MMC1): bank switching via 5-bit shift register.
 //!
-//! Writes to $8000–$9FFF (control), $A000–$BFFF (CHR0), $C000–$DFFF (CHR1), $E000–$FFFF (PRG).
-//! Each write shifts in one bit; after 5 writes the value is latched.
+//! [MMC1](https://www.nesdev.org/wiki/MMC1): writes to $8000–$9FFF (control), $A000–$BFFF (CHR0),
+//! $C000–$DFFF (CHR1), $E000–$FFFF (PRG bank). Any write with bit 7 set resets the shift register.
+//! Otherwise, bit 0 is shifted in (LSB first); after 5 writes, the value is latched to the selected
+//! register. Control (bits 0–1) = mirroring; bits 2–3 = PRG mode; bit 4 = CHR mode. We implement
+//! PRG banking only; CHR banking is omitted (single bank or RAM as needed).
 
 use crate::cartridge::mapper::{Mirroring, mapper::Mapper};
 
-/// MMC1: shift register, control (mirroring, PRG/CHR mode), PRG bank. CHR banking omitted here.
+/// MMC1 state: 5-bit shift register, control byte (mirroring + PRG/CHR mode), PRG bank select.
 pub struct Mapper1 {
     prg_rom: Vec<u8>,
     shift_reg: u8,
@@ -15,7 +18,7 @@ pub struct Mapper1 {
 }
 
 impl Mapper1 {
-    /// Create Mapper1 with PRG ROM (CHR may be RAM or ROM depending on cartridge).
+    /// Create MMC1 with PRG ROM. Control defaults to $0C (PRG mode 3: $8000 switchable, $C000 fixed last).
     pub fn new(prg_rom: Vec<u8>) -> Self {
         Self {
             prg_rom,
@@ -26,12 +29,11 @@ impl Mapper1 {
         }
     }
 
-    /// Control register bits 2-3: PRG bank mode (0/1/2/3).
+    /// PRG bank mode from control bits 2–3: 0/1 = 32 KiB mode; 2 = $8000 fixed first, $C000 switchable; 3 = $8000 switchable, $C000 fixed last.
     fn prg_bank_mode(&self) -> u8 {
         (self.control >> 2) & 0b11
     }
 
-    /// Number of 16KB PRG banks.
     fn prg_bank_count(&self) -> usize {
         self.prg_rom.len() / 0x4000
     }
@@ -40,7 +42,7 @@ impl Mapper1 {
 impl Mapper for Mapper1 {
     fn read(&self, addr: u16) -> u8 {
         match addr {
-            // PRG ROM: bank mode determines $8000/$C000 mapping
+            // PRG: bank mode and prg_bank select which 16 KiB bank(s) appear at $8000 and $C000.
             0x8000..=0xFFFF => {
                 let bank_mode = self.prg_bank_mode();
                 let bank_count = self.prg_bank_count();
@@ -78,7 +80,7 @@ impl Mapper for Mapper1 {
     }
 
     fn write(&mut self, addr: u16, data: u8) {
-        // Reset shift register when bit 7 set
+        // MMC1: write with bit 7 set resets shift register (and often control to $0C).
         if data & 0x80 != 0 {
             self.shift_reg = 0;
             self.shift_count = 0;
@@ -86,7 +88,7 @@ impl Mapper for Mapper1 {
             return;
         }
 
-        // Shift in bit 0; after 5 writes, latch and apply
+        // Shift in LSB (bit 0); after 5 writes, latch to the register selected by address.
         self.shift_reg >>= 1;
         self.shift_reg |= (data & 1) << 4;
         self.shift_count += 1;
@@ -96,27 +98,21 @@ impl Mapper for Mapper1 {
         }
 
         match addr {
-            // $8000-$9FFF: control register (mirroring, PRG/CHR mode)
-            0x8000..=0x9FFF => {
-                self.control = self.shift_reg & 0x1F;
-            }
-            // $E000-$FFFF: PRG bank select
-            0xE000..=0xFFFF => {
-                self.prg_bank = self.shift_reg & 0x0F;
-            }
-            _ => {}
+            0x8000..=0x9FFF => self.control = self.shift_reg & 0x1F,  // Control: mirroring, PRG/CHR mode
+            0xE000..=0xFFFF => self.prg_bank = self.shift_reg & 0x0F,  // PRG bank (4-bit)
+            _ => {}  // CHR0/CHR1 ($A000–$BFFF, $C000–$DFFF) not implemented
         }
 
         self.shift_reg = 0;
         self.shift_count = 0;
     }
 
+    /// Mirroring from control bits 0–1: 0 or 1 = one-screen lower/upper or horizontal; 2 = vertical; 3 = one-screen. We map 0|1 → Horizontal, 2 → Vertical.
     fn mirroring(&mut self) -> Mirroring {
-        // Control bits 0-1: mirroring (0/1=H, 2=V, 3=1-screen)
         match self.control & 0b11 {
             0 | 1 => Mirroring::Horizontal,
             2 => Mirroring::Vertical,
-            3 => Mirroring::Horizontal, // one-screen ignored for now
+            3 => Mirroring::Horizontal, // one-screen: treat as horizontal for simplicity
             _ => unreachable!(),
         }
     }

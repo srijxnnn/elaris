@@ -1,10 +1,7 @@
 //! NES APU (Audio Processing Unit) emulation.
 //!
-//! - **Pulse** (×2): square waves with duty, envelope, sweep, length counter.
-//! - **Triangle**: 32-step wave, linear counter, length counter.
-//! - **Noise**: LFSR-based, envelope, length counter.
-//! - **Frame counter**: 4-step or 5-step mode; clocks envelope/linear/length/sweep.
-//! - **DMC**: Delta modulation channel; sample playback from PRG with CPU stall on fetch.
-//! - **Mixer**: NES-style non-linear mix; output sampled at 44.1 kHz.
+//! Implements the [APU](https://www.nesdev.org/wiki/APU): pulse×2, triangle, noise, DMC, [frame
+//! counter](https://www.nesdev.org/wiki/APU_Frame_Counter), and [mixer](https://www.nesdev.org/wiki/APU_Mixer).
+//! Registers $4000–$4013, $4015, $4017. Output resampled to 44.1 kHz.
 
 pub mod apu;

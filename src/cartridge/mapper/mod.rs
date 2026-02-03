@@ -1,8 +1,13 @@
-//! NES mappers for PRG/CHR memory mapping.
+//! NES mappers for PRG/CHR memory mapping and nametable mirroring.
 //!
-//! Mapper0 (NROM), Mapper1 (MMC1). Each mapper provides read/write and mirroring.
+//! - **Mapper 0** ([NROM](https://www.nesdev.org/wiki/NROM)): no bank switching.
+//! - **Mapper 1** ([MMC1](https://www.nesdev.org/wiki/MMC1)): shift-register bank switching.
+//!
+//! Mirroring controls how the PPU maps the four logical nametables ($2000, $2400, $2800, $2C00) to
+//! 2 KiB of internal RAM. See [PPU nametables](https://www.nesdev.org/wiki/PPU_nametables#Nametable_mirroring).
 
-/// Nametable mirroring mode for the PPU (how $2000–$2FFF maps to internal nametables).
+/// Nametable mirroring: Horizontal = left/right pairs share data (vertical mirroring in NESdev terms);
+/// Vertical = top/bottom pairs share data (horizontal mirroring). See Mirroring.
 #[derive(Clone, Copy)]
 pub enum Mirroring {
     Horizontal,

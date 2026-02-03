@@ -1,11 +1,24 @@
 //! NES PPU (Picture Processing Unit) implementation.
 //!
-//! Handles vblank timing, nametable mirroring, VRAM access, background and sprite
-//! rendering, OAM, and the 256×240 framebuffer. Registers: $2000–$2007 (mirrored).
+//! Emulates the [PPU](https://www.nesdev.org/wiki/PPU) (2C02): [PPU registers](https://www.nesdev.org/wiki/PPU_registers)
+//! $2000–$2007 (mirrored every 8 bytes to $3FFF), [PPU memory map](https://www.nesdev.org/wiki/PPU_memory_map)
+//! (pattern tables, nametables, palette), [OAM](https://www.nesdev.org/wiki/PPU_OAM), and rendering.
+//!
+//! ## Timing
+//!
+//! 341 PPU cycles per scanline; 262 scanlines per frame (0–239 visible, 240 post-render, 241 vblank,
+//! 261 pre-render). VBlank NMI at scanline 241, cycle 1. PPU runs at 3× CPU clock.
+//!
+//! ## References
+//!
+//! - [PPU scrolling](https://www.nesdev.org/wiki/PPU_scrolling) (internal v, t, x, w)
+//! - [PPU rendering](https://www.nesdev.org/wiki/PPU_rendering), [Nametables](https://www.nesdev.org/wiki/PPU_nametables)
+//! - [Sprite 0 hit](https://www.nesdev.org/wiki/PPU_OAM#Sprite_zero_hits), [Sprite overflow](https://www.nesdev.org/wiki/PPU_sprite_evaluation#Sprite_overflow_bug)
 
 use crate::cartridge::{cartridge::Cartridge, mapper::Mirroring};
 
-/// NES 2C02-style 64-color palette (0xRRGGBB). Index 0 = backdrop.
+/// NES 2C02 64-color RGB palette (0xRRGGBB). Used to convert 6-bit palette indices to display.
+/// Index 0 is the backdrop color ($3F00). See PPU_palettes.
 pub const NES_PALETTE_RGB: [u32; 64] = [
     0x545454, 0x001E74, 0x081090, 0x300088, 0x440064, 0x5C0030, 0x540400, 0x3C1800, 0x202A00,
     0x083A00, 0x004000, 0x003C00, 0x00302C, 0x000000, 0x000000, 0x000000, 0x989698, 0x084CC4,
@@ -17,38 +30,41 @@ pub const NES_PALETTE_RGB: [u32; 64] = [
     0x000000,
 ];
 
-/// OAM (Object Attribute Memory): 64 sprites × 4 bytes. Each entry: Y, tile, attr, X.
+/// OAM (Object Attribute Memory): 64 sprites × 4 bytes. Each entry: Y, tile index, attributes, X.
+/// See PPU_OAM (byte 0=Y, 1=tile, 2=attr, 3=X).
 pub const OAM_LEN: usize = 256;
 
-/// PPU state: timing, VRAM, nametables, palettes, OAM, and framebuffer.
+/// PPU state: cycle (0–340) and scanline (-1=pre-render, 0–239=visible, 241=vblank start), internal
+/// registers, nametable RAM (2 KiB), palette (32 bytes $3F00–$3F1F), OAM, and framebuffer.
 pub struct PPU {
     pub cycle: u16,
     pub scanline: i16,
     pub nmi: bool,
     pub vblank: bool,
-    /// Set when entering vblank (scanline 241); clear after presenting the framebuffer.
+    /// True when we've entered vblank (scanline 241); host clears after presenting frame.
     pub frame_ready: bool,
+    /// PPUCTRL ($2000): NMI enable, sprite size, bg/sprite pattern table, increment, nametable.
     pub ctrl: u8,
-    /// PPUMASK ($2001): bit0=grayscale, bit1=show bg left 8px, bit2=show sprites left 8px,
-    /// bit3=show background, bit4=show sprites, bits5-7=color emphasis (R,G,B).
+    /// PPUMASK ($2001): grayscale (0), show bg/sprite left 8 (1,2), show bg/sprite (3,4), emphasis (5–7).
     pub mask: u8,
+    /// Current VRAM address (PPUADDR $2006; 14-bit). Shared with scroll internally.
     pub addr: u16,
     pub addr_latch: bool,
     pub scroll_x: u8,
     pub scroll_y: u8,
     pub scroll_latch: bool,
+    /// Nametable RAM: 2 KiB for $2000–$2FFF (mirroring applied per cartridge). PPU_nametables.
     pub nametable: [u8; 0x800],
-    /// Palette RAM $3F00-$3F1F (32 bytes, with NES mirroring).
+    /// Palette RAM: 32 bytes ($3F00–$3F1F); $3F10/14/18/1C mirror $3F00. PPU_palettes.
     pub palette: [u8; 32],
-    /// OAM: 64 sprites × 4 bytes (Y, tile, attr, X). Written via $2003/$2004 or $4014 DMA.
+    /// OAM: 256 bytes. Filled via OAMDATA ($2003/$2004) or OAMDMA ($4014).
     pub oam: [u8; OAM_LEN],
-    /// OAM address for $2003/$2004 (byte index 0..255).
     pub oam_addr: u8,
-    /// Sprite 0 hit (PPUSTATUS bit 6); cleared on read of $2002.
+    /// Sprite 0 hit flag (PPUSTATUS bit 6). Set when sprite 0 overlaps background; clear on $2002 read.
     pub sprite_0_hit: bool,
-    /// Sprite overflow (PPUSTATUS bit 5); cleared on read of $2002.
+    /// Sprite overflow flag (PPUSTATUS bit 5). Buggy on hardware; clear on $2002 read.
     pub sprite_overflow: bool,
-    /// 256×240 framebuffer (0xRRGGBB per pixel). Row-major, left-to-right, top-to-bottom.
+    /// 256×240 framebuffer (one u32 0xRRGGBB per pixel). Row-major, scanline 0 = top.
     pub framebuffer: [u32; 256 * 240],
 }
 
@@ -78,7 +94,7 @@ impl PPU {
         }
     }
 
-    /// Apply PPUMASK grayscale (bit0) and color emphasis (bits5-7) to a pixel.
+    /// Apply PPUMASK: grayscale (bit 0) and color emphasis (bits 5–7). See PPUMASK "Color control".
     fn apply_display_mask(&self, rgb: u32) -> u32 {
         let r = ((rgb >> 16) & 0xFF) as u32;
         let g = ((rgb >> 8) & 0xFF) as u32;
@@ -110,8 +126,9 @@ impl PPU {
         (r << 16) | (g << 8) | b
     }
 
-    /// Render one visible scanline into the framebuffer (background + sprites).
-    /// Called when the PPU has just finished that scanline (real NES: pixels output during the scanline).
+    /// Render one visible scanline (0–239) into the framebuffer: background from nametable + scroll,
+    /// then up to 8 sprites (priority: lower OAM index on top). Sprite 0 hit and overflow set here.
+    /// Called when the PPU cycle counter has just completed that scanline (341 cycles). PPU_rendering.
     pub fn render_scanline(&mut self, cart: &mut Cartridge, scanline: u16) {
         let fine_x = self.scroll_x & 7;
         let fine_y = self.scroll_y & 7;
@@ -312,9 +329,9 @@ impl PPU {
         }
     }
 
-    /// Advance PPU by one cycle (341 per scanline). Updates vblank/NMI.
-    /// Returns `Some(scanline)` when a visible scanline (0..240) has just finished,
-    /// so the bus can call `render_scanline` for it.
+    /// Advance PPU by one cycle. 341 cycles per scanline; at cycle 1 of scanline 241 set vblank and
+    /// optionally NMI. Returns Some(scanline) when a visible scanline (0–239) has just completed
+    /// (cycle 341), so the bus can render it. See PPU_rendering, Cycle_reference_chart.
     pub fn tick(&mut self) -> Option<u16> {
         self.cycle += 1;
 
@@ -349,7 +366,8 @@ impl PPU {
         completed_scanline
     }
 
-    /// Read PPUSTATUS ($2002); clears vblank, sprite 0 hit, sprite overflow, addr latch, scroll latch.
+    /// Read PPUSTATUS ($2002): bits 7=vblank, 6=sprite 0 hit, 5=sprite overflow; lower bits open bus.
+    /// Side effect: clears vblank/sprite flags and the w (write latch) for PPUSCROLL/PPUADDR.
     pub fn read_status(&mut self) -> u8 {
         let mut status = 0u8;
 
@@ -389,8 +407,8 @@ impl PPU {
         self.oam_addr = self.oam_addr.wrapping_add(1);
     }
 
-    /// Copy 256 bytes from CPU RAM into OAM (OAM DMA from $4014). Source page is the high byte;
-    /// address is mirrored in 2KB RAM (e.g. page 0x02 → $0200-$02FF).
+    /// OAMDMA ($4014): copy 256 bytes from CPU RAM page `page` (high byte of address, e.g. $02 →
+    /// $0200–$02FF) into OAM. Takes 513–514 cycles; we copy in one go. OAMADDR should be 0 first.
     pub fn oam_dma(&mut self, ram: &[u8; 2048], page: u8) {
         let start = ((page as u16) << 8) as usize % 2048;
         for i in 0..256 {
@@ -419,7 +437,8 @@ impl PPU {
         }
     }
 
-    /// Read PPUDATA ($2007); auto-increments VRAM address.
+    /// Read PPUDATA ($2007): return byte at current VRAM address; then increment addr by 1 or 32
+    /// (PPUCTRL bit 2). Palette $3F00–$3F1F returns immediately; other reads use internal buffer.
     pub fn read_data(&mut self, cart: &mut Cartridge) -> u8 {
         let addr = self.addr & 0x3FFF;
 
@@ -488,7 +507,8 @@ impl PPU {
         self.addr = self.addr.wrapping_add(inc);
     }
 
-    /// Write PPUSCROLL ($2005): first write = fine X and coarse X, second write = fine Y and coarse Y.
+    /// Write PPUSCROLL ($2005): two-byte write. First = X scroll (fine + coarse low 8); second = Y.
+    /// Bit 8 of X/Y come from PPUCTRL bits 0–1. Shared w register with PPUADDR; read $2002 to reset.
     pub fn write_scroll(&mut self, data: u8) {
         if !self.scroll_latch {
             self.scroll_x = data;
