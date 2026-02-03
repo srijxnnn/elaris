@@ -1,6 +1,7 @@
 //! NES cartridge loading and mapper support.
 //!
-//! Parses iNES format ROMs and delegates memory access to mappers.
+//! - **cartridge**: Loads iNES (.nes) files, holds PRG/CHR and mapper.
+//! - **mapper**: NROM (0), MMC1 (1); PRG/CHR bank switching and nametable mirroring.
 
 pub mod cartridge;
 pub mod mapper;

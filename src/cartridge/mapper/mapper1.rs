@@ -1,8 +1,9 @@
-//! Mapper 1 (MMC1): bank switching via shift register.
+//! Mapper 1 (MMC1): bank switching via 5-bit shift register.
+//!
+//! Writes to $8000–$9FFF (control), $A000–$BFFF (CHR0), $C000–$DFFF (CHR1), $E000–$FFFF (PRG).
+//! Each write shifts in one bit; after 5 writes the value is latched.
 
-use crate::cartridge::mapper::{Mirroring, mapper::Mapper};
-
-/// MMC1 mapper: shift-register based bank switching for PRG and CHR.
+/// MMC1: shift register, control (mirroring, PRG/CHR mode), PRG bank. CHR banking omitted here.
 pub struct Mapper1 {
     prg_rom: Vec<u8>,
     shift_reg: u8,

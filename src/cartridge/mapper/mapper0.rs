@@ -1,8 +1,8 @@
-//! Mapper 0 (NROM): no bank switching, 16/32KB PRG, 8KB CHR.
+//! Mapper 0 (NROM): no bank switching, 16 or 32 KiB PRG, 8 KiB CHR (or CHR RAM).
 
 use crate::cartridge::mapper::{Mirroring, mapper::Mapper};
 
-/// NROM mapper: fixed PRG and CHR, optionally 16KB PRG mirror.
+/// NROM: single PRG bank (16 KiB mirrored to 32 KiB if size is 16 KiB), fixed CHR.
 pub struct Mapper0 {
     prg_rom: Vec<u8>,
     chr_rom: Vec<u8>,

@@ -1,3 +1,5 @@
+# NES emulator: CPU, PPU, APU, cartridge mappers, display, and audio.
+
 [package]
 name = "elaris"
 version = "0.1.0"
@@ -5,7 +7,7 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 description = "A NES emulator written in Rust. (WIP)"
 
-
 [dependencies]
-ansi_term = "0.12.1"
-minifb = "0.28"
+ansi_term = "0.12.1"  # Nestest trace output
+minifb = "0.28"      # 256×240 window
+rodio = "0.19"       # Audio output (APU)

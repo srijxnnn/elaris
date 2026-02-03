@@ -1,18 +1,23 @@
 //! NES emulator entry point.
 //!
-//! Loads a cartridge and runs the CPU with a display window.
-//! Usage: elaris [path/to/game.nes]
+//! Loads a cartridge and runs the CPU with a display window and audio output.
+//! Usage: `elaris [path/to/game.nes]`
 
 use std::env;
 use std::time::{Duration, Instant};
 
 use elaris::{bus::NesBus, cartridge::cartridge::Cartridge, cpu::cpu::CPU};
 use minifb::{Key, Window, WindowOptions};
+use rodio::OutputStream;
 
-/// NES runs at ~60.0988 Hz (NTSC). Target one frame per 16.67 ms for ~60 fps.
+/// NES frame rate ~60.0988 Hz (NTSC). Target one frame per 16.67 ms for ~60 fps display.
 const FRAME_DURATION: Duration = Duration::from_nanos(16_666_667);
 
+/// Audio output sample rate (Hz). Matches APU sample generation rate.
+const SAMPLE_RATE: u32 = 44_100;
+
 fn main() {
+    // Load ROM from path or default to nestest for CPU verification
     let path = env::args()
         .nth(1)
         .unwrap_or_else(|| "test/nestest.nes".to_string());
@@ -39,6 +44,7 @@ fn main() {
         cpu.reset();
     }
 
+    // NES native resolution 256×240
     let mut window = Window::new(
         "Elaris",
         256,
@@ -58,10 +64,16 @@ fn main() {
 
     window.set_target_fps(60);
 
+    // Audio: default device, sink for queueing APU samples each frame
+    let (_stream, stream_handle) = OutputStream::try_default().expect("No default audio device");
+    let sink = rodio::Sink::try_new(&stream_handle).expect("Failed to create audio sink");
+    let mut audio_buf = vec![0.0f32; 1024];
+
+    // Main loop: run one frame of emulation, then present and pace to 60 fps
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let frame_start = Instant::now();
 
-        // Run until PPU enters vblank (scanline 241)
+        // Run CPU until PPU enters vblank (scanline 241); PPU/APU tick on each bus.tick()
         while !cpu.bus.frame_ready() {
             cpu.step();
             if cpu.halted {
@@ -78,6 +90,17 @@ fn main() {
                 .update_with_buffer(&cpu.bus.ppu.framebuffer, 256, 240)
                 .expect("Failed to update window");
             cpu.bus.clear_frame_ready();
+
+            // Push APU samples to audio output (convert 0..1 to -1..1 for proper playback)
+            let n = cpu.bus.apu.drain_samples(&mut audio_buf);
+            if n > 0 {
+                let samples: Vec<f32> = audio_buf[..n]
+                    .iter()
+                    .map(|s| (s * 2.0 - 1.0).clamp(-1.0, 1.0))
+                    .collect();
+                let source = rodio::buffer::SamplesBuffer::new(1, SAMPLE_RATE, samples);
+                sink.append(source);
+            }
         }
 
         // Pace to ~60 fps so we don't burn CPU (emulation is far faster than real NES)

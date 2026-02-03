@@ -1,7 +1,8 @@
 //! 6502 CPU implementation for the NES.
 //!
-//! Emulates the MOS 6502 processor including all official and undocumented opcodes
-//! used by the NES. Supports nestest verification.
+//! Emulates the MOS 6502 (Ricoh 2A03 variant): all official and undocumented
+//! opcodes used by the NES. Bus trait abstracts memory and I/O. Supports
+//! nestest for verification. NMI from PPU vblank; no IRQ/BRK cycle accuracy.
 
 use core::panic;
 
@@ -13,9 +14,11 @@ use crate::{
     },
 };
 
-use ansi_term::Colour::{Green, Red};
+use ansi_term::Colour::Red;
 
 /// 6502 CPU with generic bus for memory/IO access.
+/// A, X, Y: accumulators and index registers. SP: stack pointer ($0100–$01FF).
+/// PC: program counter. status: P register (NZVCIDB flags). cycles: total elapsed.
 pub struct CPU<B: Bus> {
     pub a: u8,
     pub x: u8,
@@ -25,6 +28,7 @@ pub struct CPU<B: Bus> {
     pub status: u8,
     pub cycles: usize,
     pub bus: B,
+    /// True when JAM (illegal opcode) has been executed.
     pub halted: bool,
 }
 
@@ -92,12 +96,14 @@ impl<B: Bus> CPU<B> {
         );
     }
 
-    /// Dispatch opcode to the appropriate instruction handler.
+    /// Dispatch opcode to the appropriate instruction handler (by opcode value).
     fn execute_opcode(&mut self, opcode: u8) {
         match opcode {
+            // JAM (undocumented): halt CPU
             0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 | 0x92 | 0xB2 | 0xD2 | 0xF2 => {
                 self.jam()
             }
+            // NOP variants
             0xEA => self.nop(),
             0x04 | 0x44 | 0x64 => self.nop_zeropage(),
             0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => self.nop_zeropage_x(),

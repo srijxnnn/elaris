@@ -1,6 +1,7 @@
 //! NES PPU (Picture Processing Unit) implementation.
 //!
-//! Handles vblank timing, nametable mirroring, VRAM access, and background rendering.
+//! Handles vblank timing, nametable mirroring, VRAM access, background and sprite
+//! rendering, OAM, and the 256×240 framebuffer. Registers: $2000–$2007 (mirrored).
 
 use crate::cartridge::{cartridge::Cartridge, mapper::Mirroring};
 
@@ -49,7 +50,7 @@ pub struct PPU {
 }
 
 impl PPU {
-    /// Create PPU in initial state (pre-render scanline).
+    /// Create PPU in initial state (pre-render scanline -1, cycle 0).
     pub fn new() -> Self {
         Self {
             cycle: 0,
@@ -246,8 +247,8 @@ impl PPU {
         }
     }
 
-    /// Resolve PPU palette address $3F00-$3F1F (and $3F20-$3FFF mirrors) to palette index.
-    /// $3F10, $3F14, $3F18, $3F1C mirror $3F00 (background color).
+    /// Resolve PPU palette address $3F00–$3F1F (and $3F20–$3FFF mirrors) to 32-byte index.
+    /// Addresses $3F10, $3F14, $3F18, $3F1C mirror $3F00 (background color).
     fn palette_index(addr: u16) -> usize {
         let i = (addr & 0x1F) as usize;
         if i == 16 || i == 20 || i == 24 || i == 28 {
@@ -257,9 +258,9 @@ impl PPU {
         }
     }
 
-    /// Advance PPU by one cycle; update vblank/NMI timing.
-    /// Returns `Some(scanline)` when a visible scanline (0..240) has just been completed,
-    /// so the bus can render that scanline (real NES: pixels were output during the scanline).
+    /// Advance PPU by one cycle (341 per scanline). Updates vblank/NMI.
+    /// Returns `Some(scanline)` when a visible scanline (0..240) has just finished,
+    /// so the bus can call `render_scanline` for it.
     pub fn tick(&mut self) -> Option<u16> {
         self.cycle += 1;
 
@@ -348,7 +349,7 @@ impl PPU {
         self.ctrl = data;
     }
 
-    /// Write PPUADDR ($2006); 16-bit register written as two bytes.
+    /// Write PPUADDR ($2006): two-byte write for 16-bit VRAM address (high then low).
     pub fn write_addr(&mut self, data: u8) {
         if !self.addr_latch {
             self.addr = (data as u16) << 8;
@@ -393,7 +394,7 @@ impl PPU {
         data
     }
 
-    /// Write PPUDATA ($2007); auto-increments VRAM address.
+    /// Write PPUDATA ($2007): writes VRAM at current address, then increments (by 1 or 32 per PPUCTRL).
     pub fn write_data(&mut self, cart: &mut Cartridge, data: u8) {
         let addr = self.addr & 0x3FFF;
 
@@ -428,7 +429,7 @@ impl PPU {
         self.addr = self.addr.wrapping_add(inc);
     }
 
-    /// Write PPUSCROLL ($2005); two writes for X and Y scroll.
+    /// Write PPUSCROLL ($2005): first write = fine X and coarse X, second write = fine Y and coarse Y.
     pub fn write_scroll(&mut self, data: u8) {
         if !self.scroll_latch {
             self.scroll_x = data;
@@ -439,7 +440,7 @@ impl PPU {
         }
     }
 
-    /// Map PPU nametable address to internal index based on mirroring mode.
+    /// Map PPU nametable VRAM address ($2000–$2FFF) to internal 2 KiB index using mirroring.
     pub fn map_nametable_addr(addr: u16, mirroring: Mirroring) -> u16 {
         let addr = (addr - 0x2000) & 0xfff;
         let table = addr / 0x400;
