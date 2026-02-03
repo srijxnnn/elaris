@@ -2,6 +2,7 @@
 //!
 //! - **Mapper 0** ([NROM](https://www.nesdev.org/wiki/NROM)): no bank switching.
 //! - **Mapper 1** ([MMC1](https://www.nesdev.org/wiki/MMC1)): shift-register bank switching.
+//! - **Mapper 4** ([MMC3](https://www.nesdev.org/wiki/MMC3)): bank switching, switchable mirroring, PRG RAM, scanline IRQ.
 //!
 //! Mirroring controls how the PPU maps the four logical nametables ($2000, $2400, $2800, $2C00) to
 //! 2 KiB of internal RAM. See [PPU nametables](https://www.nesdev.org/wiki/PPU_nametables#Nametable_mirroring).
@@ -18,3 +19,4 @@ pub mod mapper;
 
 pub mod mapper0;
 pub mod mapper1;
+pub mod mapper4;

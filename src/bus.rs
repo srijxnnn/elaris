@@ -23,6 +23,10 @@ pub trait Bus {
     fn write(&mut self, addr: u16, data: u8);
     fn tick(&mut self, cycles: usize);
     fn poll_nmi(&mut self) -> bool;
+    /// Poll cartridge IRQ (e.g. MMC3 scanline IRQ). Returns true if IRQ was pending and clears it.
+    fn poll_irq(&mut self) -> bool {
+        false
+    }
 }
 
 /// Main NES bus: 2 KiB internal RAM, PPU, APU, cartridge, controller.
@@ -80,8 +84,10 @@ impl Bus for NesBus {
             0x4000..=0x4014 | 0x4017..=0x401F => 0x40,
             0x4015 => self.apu.read_status(),
             0x4016 => self.controller.read(),
-            // $4020–$7FFF: Unmapped; available for cartridge (e.g. PRG RAM $6000–$7FFF). Open bus.
-            0x4020..=0x7FFF => 0x40,
+            // $4020–$5FFF: Unmapped; open bus.
+            0x4020..=0x5FFF => 0x40,
+            // $6000–$7FFF: Cartridge PRG RAM (e.g. MMC3 save RAM).
+            0x6000..=0x7FFF => self.cart.read(addr),
             // $8000–$FFFF: Cartridge PRG ROM (and fixed last bank for vectors $FFFA–$FFFF).
             0x8000..=0xFFFF => self.cart.read(addr),
         }
@@ -112,7 +118,8 @@ impl Bus for NesBus {
             0x4017 => self.apu.write(0x4017, data),
             0x4016 => self.controller.write(data), // Latch (bit 0): 1=strobe, then read $4016 for bits.
             0x4018..=0x401F => {}
-            0x4020..=0x7FFF => {}
+            0x4020..=0x5FFF => {}
+            0x6000..=0x7FFF => self.cart.write(addr, data),
             // Cartridge: mapper registers (e.g. MMC1 at $8000–$FFFF by bank).
             0x8000..=0xFFFF => self.cart.write(addr, data),
         }
@@ -138,5 +145,9 @@ impl Bus for NesBus {
         } else {
             false
         }
+    }
+
+    fn poll_irq(&mut self) -> bool {
+        self.cart.poll_irq()
     }
 }

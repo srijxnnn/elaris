@@ -74,6 +74,10 @@ impl<B: Bus> CPU<B> {
         if self.bus.poll_nmi() {
             self.nmi();
         }
+        // IRQ (e.g. MMC3 scanline IRQ): poll and handle if I flag clear.
+        if self.bus.poll_irq() {
+            self.irq();
+        }
 
         let opcode = self.fetch_byte();
         let prev_cycles = self.cycles;

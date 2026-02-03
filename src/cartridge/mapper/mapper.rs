@@ -18,4 +18,10 @@ pub trait Mapper {
     /// Current nametable mirroring: horizontal (vertical mirroring), vertical (horizontal
     /// mirroring), or one-screen. PPU uses this to map $2000–$2FFF to 2 KiB. See PPU_nametables.
     fn mirroring(&mut self) -> Mirroring;
+    /// Called when the PPU reads a CHR address (e.g. MMC3 clocks IRQ on A12 rising edge). Default: no-op.
+    fn on_chr_access(&mut self, _addr: u16) {}
+    /// Returns true if mapper has a pending IRQ and clears it. Default: false.
+    fn poll_irq(&mut self) -> bool {
+        false
+    }
 }

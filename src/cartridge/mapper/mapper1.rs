@@ -98,9 +98,9 @@ impl Mapper for Mapper1 {
         }
 
         match addr {
-            0x8000..=0x9FFF => self.control = self.shift_reg & 0x1F,  // Control: mirroring, PRG/CHR mode
-            0xE000..=0xFFFF => self.prg_bank = self.shift_reg & 0x0F,  // PRG bank (4-bit)
-            _ => {}  // CHR0/CHR1 ($A000–$BFFF, $C000–$DFFF) not implemented
+            0x8000..=0x9FFF => self.control = self.shift_reg & 0x1F, // Control: mirroring, PRG/CHR mode
+            0xE000..=0xFFFF => self.prg_bank = self.shift_reg & 0x0F, // PRG bank (4-bit)
+            _ => {} // CHR0/CHR1 ($A000–$BFFF, $C000–$DFFF) not implemented
         }
 
         self.shift_reg = 0;

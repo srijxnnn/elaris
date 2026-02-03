@@ -11,6 +11,7 @@ use std::io::Read;
 use crate::cartridge::mapper::mapper::Mapper;
 use crate::cartridge::mapper::mapper0::Mapper0;
 use crate::cartridge::mapper::mapper1::Mapper1;
+use crate::cartridge::mapper::mapper4::Mapper4;
 
 /// Cartridge: holds PRG/CHR and the mapper that implements read/write and nametable mirroring.
 /// CPU reads PRG via bus at $8000–$FFFF; PPU reads CHR at $0000–$1FFF (pattern tables).
@@ -41,11 +42,12 @@ impl Cartridge {
             vec![0; 8 * 1024] // No CHR ROM → 8 KiB CHR RAM (e.g. some NROM, MMC1)
         };
 
-        // Mapper number from header bytes 6–7 (iNES). 0 = NROM, 1 = MMC1.
+        // Mapper number from header bytes 6–7 (iNES). 0 = NROM, 1 = MMC1, 4 = MMC3.
         let mapper_id = (data[6] >> 4) | (data[7] & 0xF0);
         let mapper: Box<dyn Mapper> = match mapper_id {
             0 => Box::new(Mapper0::new(prg_rom, chr_rom)),
             1 => Box::new(Mapper1::new(prg_rom)),
+            4 => Box::new(Mapper4::new(prg_rom, chr_rom)),
             _ => panic!("unsupported mapper {}", mapper_id),
         };
 
@@ -60,5 +62,15 @@ impl Cartridge {
     /// Write: CHR RAM (if present) or mapper registers (e.g. MMC1 shift register). PRG ROM is R/O.
     pub fn write(&mut self, addr: u16, data: u8) {
         self.mapper.write(addr, data);
+    }
+
+    /// Notify mapper of PPU CHR read (e.g. MMC3 IRQ counter on A12 rising edge).
+    pub fn on_chr_access(&mut self, addr: u16) {
+        self.mapper.on_chr_access(addr);
+    }
+
+    /// Poll and clear mapper IRQ (e.g. MMC3 scanline IRQ). Returns true if IRQ was pending.
+    pub fn poll_irq(&mut self) -> bool {
+        self.mapper.poll_irq()
     }
 }

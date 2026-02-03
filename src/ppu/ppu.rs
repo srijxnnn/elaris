@@ -162,9 +162,14 @@ impl PPU {
 
             let nt_x = tile_x / 32;
             let nt_y = tile_y / 30;
+
+            let base_nt_x = nametable_base & 1;
+            let base_nt_y = (nametable_base >> 1) & 1;
+
+            let logical_nt = (base_nt_x ^ nt_x) + ((base_nt_y ^ nt_y) << 1);
             let nt_phys = match mirroring {
-                Mirroring::Horizontal => (nametable_base & 1) ^ nt_x,
-                Mirroring::Vertical => (nametable_base >> 1) ^ nt_y,
+                Mirroring::Vertical => logical_nt & 1,
+                Mirroring::Horizontal => logical_nt >> 1,
             };
             let tile_x_in_nt = tile_x % 32;
             let tile_y_in_nt = tile_y % 30;
@@ -175,13 +180,15 @@ impl PPU {
             let attr_index =
                 (nt_phys * 0x400) + 0x3C0 + (tile_y_in_nt / 4) * 8 + (tile_x_in_nt / 4);
             let attr_byte = self.nametable[attr_index as usize];
-            let shift = ((tile_y_in_nt & 1) << 2) | ((tile_x_in_nt & 1) << 1);
+            let shift = ((tile_y_in_nt & 2) << 1) | (tile_x_in_nt & 2);
             let palette_bank = (attr_byte >> shift) & 3;
 
             let px_in_tile = (total_x % 8) as u16;
             let py_in_tile = (total_y % 8) as u16;
             let tile_addr = bg_pattern_base + (tile_id as u16) * 16;
+            cart.on_chr_access(tile_addr + py_in_tile);
             let row_lo = cart.read(tile_addr + py_in_tile);
+            cart.on_chr_access(tile_addr + py_in_tile + 8);
             let row_hi = cart.read(tile_addr + py_in_tile + 8);
             let bit = 7 - (px_in_tile % 8);
             let low = (row_lo >> bit) & 1;
@@ -277,7 +284,9 @@ impl PPU {
                 (table + tile_idx * 16, row)
             };
 
+            cart.on_chr_access(tile_addr + row_in_tile as u16);
             let row_lo = cart.read(tile_addr + row_in_tile as u16);
+            cart.on_chr_access(tile_addr + row_in_tile as u16 + 8);
             let row_hi = cart.read(tile_addr + row_in_tile as u16 + 8);
 
             if !show_sprites {
@@ -443,8 +452,11 @@ impl PPU {
         let addr = self.addr & 0x3FFF;
 
         let data = match addr {
-            // CHR: pattern tables
-            0x0000..=0x1FFF => cart.read(addr),
+            // CHR: pattern tables (notify mapper for e.g. MMC3 IRQ A12 tracking)
+            0x0000..=0x1FFF => {
+                cart.on_chr_access(addr);
+                cart.read(addr)
+            }
 
             // Nametables (with mirroring)
             0x2000..=0x2FFF => {
