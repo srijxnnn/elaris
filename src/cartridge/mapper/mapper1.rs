@@ -107,12 +107,13 @@ impl Mapper for Mapper1 {
         self.shift_count = 0;
     }
 
-    /// Mirroring from control bits 0–1: 0 or 1 = one-screen lower/upper or horizontal; 2 = vertical; 3 = one-screen. We map 0|1 → Horizontal, 2 → Vertical.
+    /// Mirroring from control bits 0–1: 0 = one-screen lower, 1 = one-screen upper, 2 = vertical, 3 = horizontal.
     fn mirroring(&mut self) -> Mirroring {
         match self.control & 0b11 {
-            0 | 1 => Mirroring::Horizontal,
+            0 => Mirroring::OneScreenLower,
+            1 => Mirroring::OneScreenUpper,
             2 => Mirroring::Vertical,
-            3 => Mirroring::Horizontal, // one-screen: treat as horizontal for simplicity
+            3 => Mirroring::Horizontal,
             _ => unreachable!(),
         }
     }

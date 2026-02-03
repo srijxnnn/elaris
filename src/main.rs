@@ -92,7 +92,7 @@ fn main() {
 
     // NES PPU output is 256×240 pixels (8×8 tiles: 32×30 visible). See PPU_registers / PPU_rendering.
     let mut window = Window::new(
-        "Elaris",
+        format!("{} - Elaris", path.split("/").last().unwrap()).as_str(),
         256,
         240,
         WindowOptions {
@@ -101,7 +101,7 @@ fn main() {
             scale: minifb::Scale::FitScreen,
             scale_mode: minifb::ScaleMode::AspectRatioStretch,
             topmost: true,
-            title: false,
+            title: true,
             transparency: false,
             none: false,
         },

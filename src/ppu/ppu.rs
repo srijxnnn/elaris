@@ -170,6 +170,8 @@ impl PPU {
             let nt_phys = match mirroring {
                 Mirroring::Vertical => logical_nt & 1,
                 Mirroring::Horizontal => logical_nt >> 1,
+                Mirroring::OneScreenLower => 0,
+                Mirroring::OneScreenUpper => 1,
             };
             let tile_x_in_nt = tile_x % 32;
             let tile_y_in_nt = tile_y % 30;
@@ -548,6 +550,8 @@ impl PPU {
                 2 | 3 => offset + 0x400,
                 _ => unreachable!(),
             },
+            Mirroring::OneScreenLower => offset,
+            Mirroring::OneScreenUpper => offset + 0x400,
         }
     }
 }
