@@ -17,7 +17,7 @@
 //! - [APU Noise](https://www.nesdev.org/wiki/APU_Noise), [APU DMC](https://www.nesdev.org/wiki/APU_DMC)
 //! - [APU Length Counter](https://www.nesdev.org/wiki/APU_Length_Counter), [APU Envelope](https://www.nesdev.org/wiki/APU_Envelope)
 
-/// NTSC CPU clock ~1.789773 MHz. We generate one sample every CYCLES_PER_SAMPLE CPU cycles (~40.56)
+/// NTSC CPU clock ~ 1.789773 MHz. We generate one sample every CYCLES_PER_SAMPLE CPU cycles (~40.56)
 /// to get 44.1 kHz output. See Cycle_reference_chart.
 const CYCLES_PER_SAMPLE: f64 = 1_789_773.0 / 44_100.0;
 

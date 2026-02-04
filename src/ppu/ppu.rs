@@ -154,17 +154,19 @@ impl PPU {
         // Background pixel values (0-3) per x for sprite 0 hit and priority. 0 = transparent.
         let mut bg_pixel: [u8; 256] = [0; 256];
 
+        let base_nt_x = nametable_base & 1;
+        let base_nt_y = (nametable_base >> 1) & 1;
+        // PPUCTRL bits 0–1 are the 9th bit of X/Y scroll (nametable base). NESdev PPU_scrolling.
+        let base_x: u32 = (base_nt_x as u32) * 256;
+        let base_y: u32 = (base_nt_y as u32) * 240;
         for x in 0..256u16 {
-            let total_x = (x as u32 + fine_x as u32 + (coarse_x as u32) * 8) % 512;
-            let total_y = (y as u32 + fine_y as u32 + (coarse_y as u32) * 8) % 480;
+            let total_x = (base_x + x as u32 + fine_x as u32 + (coarse_x as u32) * 8) % 512;
+            let total_y = (base_y + y as u32 + fine_y as u32 + (coarse_y as u32) * 8) % 480;
             let tile_x = (total_x / 8) as u16;
             let tile_y = (total_y / 8) as u16;
 
             let nt_x = tile_x / 32;
             let nt_y = tile_y / 30;
-
-            let base_nt_x = nametable_base & 1;
-            let base_nt_y = (nametable_base >> 1) & 1;
 
             let logical_nt = (base_nt_x ^ nt_x) + ((base_nt_y ^ nt_y) << 1);
             let nt_phys = match mirroring {

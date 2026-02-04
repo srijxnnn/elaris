@@ -32,15 +32,16 @@ pub struct Mapper4 {
 }
 
 impl Mapper4 {
-    /// Create MMC3 with PRG ROM and CHR ROM. PRG RAM 8 KiB is allocated for save RAM.
-    pub fn new(prg_rom: Vec<u8>, chr_rom: Vec<u8>) -> Self {
+    /// Create MMC3 with PRG ROM, CHR ROM, and initial mirroring from iNES header (byte 6 bit 0).
+    /// PRG RAM 8 KiB is allocated for save RAM.
+    pub fn new(prg_rom: Vec<u8>, chr_rom: Vec<u8>, mirroring: Mirroring) -> Self {
         Self {
             prg_rom,
             chr_rom,
             prg_ram: vec![0; 8 * 1024],
             bank_select: 0,
             regs: [0; 8],
-            mirroring: Mirroring::Vertical,
+            mirroring,
             _prg_ram_enable: true,
             _prg_ram_write_protect: false,
             irq_latch: 0,
@@ -241,6 +242,7 @@ impl Mapper for Mapper4 {
             }
             0xE000..=0xFFFF => {
                 if addr & 1 == 0 {
+                    // $E000–$FFFE (even): disable IRQ and acknowledge any pending (NESdev: only $E000 acknowledges)
                     self.irq_enabled = false;
                     self.irq_pending = false;
                 } else {

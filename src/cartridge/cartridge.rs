@@ -54,7 +54,7 @@ impl Cartridge {
         let mapper: Box<dyn Mapper> = match mapper_id {
             0 => Box::new(Mapper0::new(prg_rom, chr_rom, mirroring)),
             1 => Box::new(Mapper1::new(prg_rom)),
-            4 => Box::new(Mapper4::new(prg_rom, chr_rom)),
+            4 => Box::new(Mapper4::new(prg_rom, chr_rom, mirroring)),
             _ => panic!("unsupported mapper {}", mapper_id),
         };
 
