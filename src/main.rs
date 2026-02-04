@@ -13,6 +13,7 @@
 //!   sample fetches (4 cycles per byte from PRG).
 
 use std::env;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use elaris::{bus::Bus, bus::NesBus, cartridge::cartridge::Cartridge, cpu::cpu::CPU};
@@ -92,7 +93,14 @@ fn main() {
 
     // NES PPU output is 256×240 pixels (8×8 tiles: 32×30 visible). See PPU_registers / PPU_rendering.
     let mut window = Window::new(
-        format!("{} - Elaris", path.split("/").last().unwrap()).as_str(),
+        format!(
+            "{} - Elaris",
+            Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("ROM")
+        )
+        .as_str(),
         256,
         240,
         WindowOptions {

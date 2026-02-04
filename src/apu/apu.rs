@@ -139,10 +139,30 @@ impl Pulse {
         }
     }
 
-    fn clock_sweep(&mut self) -> bool {
-        let mut silence = false;
+    /// Returns true if the channel is muted by sweep: period < 8 or target period > 0x7FF.
+    /// Pulse 1 uses one's complement for negate, Pulse 2 uses two's complement.
+    fn sweep_silence(&self, pulse1: bool) -> bool {
+        if self.timer_period < 8 {
+            return true;
+        }
+        if self.sweep_shift == 0 {
+            return false;
+        }
+        let delta = self.timer_period >> self.sweep_shift;
+        let target = if self.sweep_negate {
+            if pulse1 {
+                self.timer_period.saturating_sub(delta).saturating_sub(1)
+            } else {
+                self.timer_period.saturating_sub(delta)
+            }
+        } else {
+            self.timer_period + delta
+        };
+        target > 0x7FF
+    }
 
-        // Save whether divider is currently zero (before reload/decrement)
+    /// pulse1: true for Pulse 1 (one's complement when negate), false for Pulse 2 (two's complement).
+    fn clock_sweep(&mut self, pulse1: bool) {
         let divider_was_zero = self.sweep_divider == 0;
 
         // Step 1: Reload divider or decrement
@@ -153,27 +173,29 @@ impl Pulse {
             self.sweep_divider -= 1;
         }
 
-        // Step 2: When divider was zero, adjust period if sweep enabled
+        // Step 2: When divider was zero, adjust period if sweep enabled and not muting
         if divider_was_zero && self.sweep_enable && self.sweep_shift > 0 {
             let delta = self.timer_period >> self.sweep_shift;
-            if self.sweep_negate {
-                self.timer_period = self.timer_period.saturating_sub(delta);
+            let target = if self.sweep_negate {
+                if pulse1 {
+                    self.timer_period.saturating_sub(delta).saturating_sub(1)
+                } else {
+                    self.timer_period.saturating_sub(delta)
+                }
             } else {
-                self.timer_period = self.timer_period.saturating_add(delta);
-            }
-            if self.timer_period > 0x7FF {
-                silence = true;
+                self.timer_period + delta
+            };
+            // Only update period if target is valid; otherwise channel stays muted, period unchanged
+            if target <= 0x7FF {
+                self.timer_period = target;
             }
         }
-
-        silence
     }
 
     fn output(&self, sweep_silence: bool) -> u8 {
         if !self.enabled
             || self.length_counter == 0
             || sweep_silence
-            || self.timer_period < 8
             || PULSE_DUTY[self.duty as usize][self.sequencer_step as usize] == 0
         {
             return 0;
@@ -631,6 +653,7 @@ impl APU {
             0x4012 => self.dmc.write_4012(data),
             0x4013 => self.dmc.write_4013(data),
             0x4015 => {
+                self.status &= 0x7F; // Writing $4015 clears the DMC interrupt flag
                 self.pulse1.enabled = data & 1 != 0;
                 self.pulse2.enabled = data & 2 != 0;
                 self.triangle.enabled = data & 4 != 0;
@@ -668,7 +691,7 @@ impl APU {
     }
 
     /// Read $4015: bits 0–3 = length counter > 0 for pulse1, pulse2, triangle, noise; bit 4 = DMC
-    /// has bytes remaining; bit 6 = frame IRQ; bit 7 = DMC IRQ. Reading clears frame and DMC IRQ.
+    /// has bytes remaining; bit 6 = frame IRQ; bit 7 = DMC IRQ. Reading clears only the frame IRQ (bit 6).
     pub fn read_status(&mut self) -> u8 {
         let mut r = self.status & 0xC0;
         if self.pulse1.length_counter > 0 {
@@ -686,7 +709,7 @@ impl APU {
         if self.dmc.has_bytes_remaining() {
             r |= 0x10;
         }
-        self.status &= 0x3F;
+        self.status &= 0xBF; // Clear only frame IRQ (bit 6), not DMC IRQ (bit 7)
         r
     }
 
@@ -720,13 +743,13 @@ impl APU {
         self.pulse2.clock_length();
         self.triangle.clock_length();
         self.noise.clock_length();
-        self.pulse1.clock_sweep();
-        self.pulse2.clock_sweep();
+        self.pulse1.clock_sweep(true); // Pulse 1: one's complement when negate
+        self.pulse2.clock_sweep(false); // Pulse 2: two's complement when negate
     }
 
     fn mix(&self) -> f32 {
-        let sweep_silence1 = self.pulse1.timer_period > 0x7FF;
-        let sweep_silence2 = self.pulse2.timer_period > 0x7FF;
+        let sweep_silence1 = self.pulse1.sweep_silence(true);
+        let sweep_silence2 = self.pulse2.sweep_silence(false);
         let p1 = self.pulse1.output(sweep_silence1);
         let p2 = self.pulse2.output(sweep_silence2);
         let pulse_sum = (p1 + p2) as usize;
@@ -757,12 +780,12 @@ impl APU {
                         self.clock_half_frame();
                     }
                     22371 => self.clock_quarter_frame(),
-                    29829 => {
-                        self.clock_half_frame();
+                    29828 => {
                         if !self.frame_irq_inhibit {
                             self.status |= 0x40;
                         }
                     }
+                    29829 => self.clock_half_frame(),
                     _ => {}
                 }
                 if self.frame_cycle >= FRAME_4STEP_RESET {
